@@ -7,6 +7,7 @@ A real-time text recognition system that reads text straight from a live camera 
 ## Features
 
 - **Live webcam OCR** — detects and overlays text with bounding boxes and confidence scores in real time, with the video feed staying smooth instead of freezing during detection.
+- **Desktop GUI** — a live feed panel, an FPS + running detection log sidebar, a one-click high-accuracy frame capture, and a static image loader (see [GUI mode](#gui-mode) below).
 - **Lighting-robust preprocessing** — automatic gamma correction based on measured frame brightness, plus CLAHE contrast enhancement and denoising for low-light frames.
 - **Single-image mode** — run the same pipeline on a static image, useful for testing or batch processing without a camera.
 - **Configurable** — camera index, OCR languages, GPU usage, confidence threshold, and detection resolution are all CLI flags.
@@ -71,6 +72,22 @@ python realtime_ocr.py --max-width 960
 
 Press `q` to quit the live window.
 
+## GUI mode
+
+```bash
+python gui_app.py
+python gui_app.py --camera 1 --gpu
+```
+
+A desktop window (Tkinter, no extra install beyond `requirements.txt`) with:
+
+- **Center**: the live annotated feed, same detection loop as the CLI.
+- **Sidebar**: current FPS, and a timestamped log of everything detected.
+- **Get OCR (capture frame)**: freezes the current frame and re-runs OCR on it at full resolution — no downscaling — trading the live loop's speed for the best accuracy that single frame can get. Result opens in a popup and is logged as `(capture)`.
+- **Load Image...**: pick any file from disk and run the same full-accuracy OCR on it, independent of the camera. Result opens in a popup and is logged as `(image)`.
+
+The GUI reuses the same `OCREngine`/`OCRWorker`/`preprocessing` modules as the CLI — it's a different front-end on the same pipeline, not a separate implementation. It also sidesteps the `opencv-python-headless` GUI conflict entirely, since Tkinter never touches OpenCV's own window backend.
+
 ## Testing
 
 The preprocessing, downscaling, and threading logic are covered by unit tests that don't need a webcam or GPU:
@@ -86,6 +103,8 @@ CI runs this same suite on every push (see [`.github/workflows/ci.yml`](.github/
 
 ```
 realtime_ocr.py    CLI entry point: webcam/image loop, downscaling, drawing
+gui_app.py          Tkinter desktop UI on top of the same pipeline
+gui_helpers.py       Pure GUI logic (log de-duplication, display resizing) kept testable
 ocr_engine.py       EasyOCR wrapper (detector + recognizer)
 ocr_worker.py       Background thread that decouples OCR speed from display FPS
 preprocessing.py    Lighting-robust preprocessing (gamma correction, CLAHE, denoising)
@@ -94,7 +113,7 @@ tests/              Unit tests for the above
 
 ## Tech Stack
 
-Python, EasyOCR, PyTorch, OpenCV, NumPy
+Python, EasyOCR, PyTorch, OpenCV, Tkinter, Pillow, NumPy
 
 ## License
 

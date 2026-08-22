@@ -15,7 +15,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install test dependencies
-        run: pip install numpy opencv-python-headless pytest
+        run: pip install numpy opencv-python-headless pillow pytest
 
       - name: Run tests
         run: pytest -v
