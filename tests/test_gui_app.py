@@ -25,6 +25,9 @@ class FakeCapture:
     def read(self):
         return True, self._frame.copy()
 
+    def get(self, prop):
+        return self._frame.shape[0]  # CAP_PROP_FRAME_HEIGHT
+
     def release(self):
         pass
 

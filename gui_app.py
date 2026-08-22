@@ -22,6 +22,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from datetime import datetime
 from tkinter import filedialog, scrolledtext
 
@@ -58,6 +59,7 @@ class OCRApp:
         self.cap = cv2.VideoCapture(camera_index)
         if not self.cap.isOpened():
             raise RuntimeError(f"Could not open camera index {camera_index}")
+        self.cam_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
 
         self.latest_frame: np.ndarray = None
         self.prev_time = time.time()
@@ -104,14 +106,15 @@ class OCRApp:
         main = ttkb.Frame(self.root, padding=12)
         main.pack(fill=tk.BOTH, expand=True)
 
-        video_frame = ttkb.Frame(main, bootstyle="dark", padding=4)
-        video_frame.grid(row=0, column=0, padx=(0, 12), sticky="n")
-        self.video_label = ttkb.Label(video_frame)
+        self.video_frame = ttkb.Frame(main, bootstyle="dark", padding=4)
+        self.video_frame.grid(row=0, column=0, padx=(0, 12), sticky="n")
+        self.video_label = ttkb.Label(self.video_frame)
         self.video_label.pack()
 
-        sidebar = ttkb.Frame(main)
-        sidebar.grid(row=0, column=1, sticky="nsew")
+        self.sidebar = ttkb.Frame(main)
+        self.sidebar.grid(row=0, column=1, sticky="nsew")
         main.columnconfigure(1, weight=1)
+        sidebar = self.sidebar
 
         status_row = ttkb.Frame(sidebar)
         status_row.pack(fill=tk.X, pady=(0, 12))
@@ -129,15 +132,46 @@ class OCRApp:
         ).pack(fill=tk.X, pady=3)
 
         ttkb.Label(sidebar, text="Detections", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(14, 4))
+
+        # A modest placeholder height; _sync_log_height() below replaces this
+        # with a value measured against the actual rendered video panel, once
+        # there's a real frame to measure against.
+        self.log_font = ("Consolas", 9)
         self.log = scrolledtext.ScrolledText(
-            sidebar, width=44, height=26, state="disabled", wrap="word",
-            font=("Consolas", 9), borderwidth=0,
+            sidebar, width=44, height=12, state="disabled", wrap="word",
+            font=self.log_font, borderwidth=0,
             bg=self.colors.bg, fg=self.colors.fg, insertbackground=self.colors.fg,
         )
         self.log.pack(fill=tk.BOTH, expand=True)
         for tag, color_name in LOG_TAG_COLORS.items():
             if color_name:
                 self.log.tag_configure(tag, foreground=getattr(self.colors, color_name))
+        self._log_height_synced = False
+
+    def _sync_log_height(self, attempts_left: int = 20) -> None:
+        """Resize the log to match the video panel's actual rendered height.
+
+        Estimating this from font metrics alone was fragile -- DPI scaling
+        and widget padding aren't predictable in advance -- so instead this
+        measures the real, already-laid-out geometry once a frame exists.
+
+        winfo_height() reports 1 (not real geometry) until a widget has
+        actually been mapped on screen at least once, so this retries for a
+        bit rather than risk computing a target height from that placeholder.
+        """
+        self.root.update_idletasks()
+        video_px = self.video_frame.winfo_height()
+        sidebar_px = self.sidebar.winfo_height()
+        log_px = self.log.winfo_height()
+
+        if attempts_left > 0 and (video_px <= 1 or sidebar_px <= 1 or log_px <= 1):
+            self.root.after(30, lambda: self._sync_log_height(attempts_left - 1))
+            return
+
+        overhead_px = sidebar_px - log_px
+        target_log_px = max(video_px - overhead_px, 100)
+        line_height_px = tkfont.Font(font=self.log_font).metrics("linespace")
+        self.log.configure(height=max(target_log_px // line_height_px, 6))
 
     def _append_log(self, text: str, tag: str = "live") -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -184,6 +218,10 @@ class OCRApp:
         imgtk = ImageTk.PhotoImage(image=Image.fromarray(rgb))
         self.video_label.imgtk = imgtk  # keep a reference so it isn't garbage collected
         self.video_label.configure(image=imgtk)
+
+        if not self._log_height_synced:
+            self._log_height_synced = True
+            self.root.after_idle(self._sync_log_height)
 
     # -- one-off high-accuracy actions -------------------------------------------
 
