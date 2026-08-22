@@ -94,3 +94,60 @@ def test_capture_button_uses_full_resolution_and_logs_via_queue(tk_root):
             assert "CAPTURED TEXT" in log_content
         finally:
             app.on_close()
+
+
+def test_video_panel_size_does_not_track_the_rendered_image(tk_root):
+    """Regression test for the window creeping larger on every frame.
+
+    The loop was: the rendered image sets the label's requested size, which
+    sets the video frame's requested size, which grows an auto-sizing
+    window, which enlarges the panel, which enlarges the next image.
+
+    Asserting on the window's size directly is unreliable -- an explicit
+    geometry() pins it and hides the bug, while without one the growth
+    saturates against the screen before a test can sample it. So this
+    asserts the underlying invariant instead: with geometry propagation
+    off, the panel's *requested* size must stay independent of whatever
+    image is currently displayed in it.
+    """
+    frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+
+    with patch("gui_app.cv2.VideoCapture", return_value=FakeCapture(frame)):
+        app = gui_app.OCRApp(tk_root, FakeEngine([]), camera_index=0, enhance=True, max_width=640)
+        try:
+            pump(tk_root, seconds=0.3, step=0.01)
+            tk_root.update_idletasks()
+
+            image_width = app.video_label.imgtk.width()
+            requested_width = app.video_frame.winfo_reqwidth()
+
+            # Pre-fix this was image_width + the frame's 8px of padding.
+            assert requested_width < image_width, (
+                f"video panel requests {requested_width}px to hold a {image_width}px "
+                "image -- its size is tracking the image again, which re-creates "
+                "the window-growth feedback loop"
+            )
+        finally:
+            app.on_close()
+
+
+def test_video_image_scales_up_when_the_window_grows(tk_root):
+    frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+
+    with patch("gui_app.cv2.VideoCapture", return_value=FakeCapture(frame)):
+        app = gui_app.OCRApp(tk_root, FakeEngine([]), camera_index=0, enhance=True, max_width=640)
+        try:
+            tk_root.state("normal")
+            tk_root.geometry("1000x650")
+            pump(tk_root, seconds=0.3, step=0.01)
+            small_width = app.video_label.imgtk.width()
+
+            tk_root.geometry("1400x900")
+            pump(tk_root, seconds=0.3, step=0.01)
+            large_width = app.video_label.imgtk.width()
+
+            assert large_width > small_width, (
+                f"video did not scale up: {small_width}px -> {large_width}px"
+            )
+        finally:
+            app.on_close()

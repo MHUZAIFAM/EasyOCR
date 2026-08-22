@@ -22,7 +22,6 @@ import queue
 import threading
 import time
 import tkinter as tk
-import tkinter.font as tkfont
 from datetime import datetime
 from tkinter import filedialog, scrolledtext
 
@@ -39,6 +38,7 @@ from realtime_ocr import downscale_for_detection, draw_results
 
 FRAME_POLL_MS = 10
 THEME = "tokyo-night-dark"
+SIDEBAR_WIDTH_PX = 360
 
 LOG_TAG_COLORS = {
     "live": None,  # falls back to the theme's default foreground
@@ -46,6 +46,22 @@ LOG_TAG_COLORS = {
     "image": "info",
     "system": "secondary",
 }
+
+
+def maximize_window(root: tk.Misc) -> None:
+    """Open maximized, filling the screen. 'zoomed' is the Windows/macOS
+    spelling; X11 builds of Tk expose it as a -zoomed attribute instead, and
+    if neither works we fall back to sizing to the screen manually."""
+    try:
+        root.state("zoomed")
+        return
+    except tk.TclError:
+        pass
+    try:
+        root.attributes("-zoomed", True)
+        return
+    except tk.TclError:
+        root.geometry(f"{root.winfo_screenwidth()}x{root.winfo_screenheight()}+0+0")
 
 
 class OCRApp:
@@ -59,7 +75,6 @@ class OCRApp:
         self.cap = cv2.VideoCapture(camera_index)
         if not self.cap.isOpened():
             raise RuntimeError(f"Could not open camera index {camera_index}")
-        self.cam_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
 
         self.latest_frame: np.ndarray = None
         self.prev_time = time.time()
@@ -73,11 +88,8 @@ class OCRApp:
         self.worker = OCRWorker(self._process_live_frame)
         self.worker.start()
 
-        self._resize_after_id: str = None
-
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.root.bind("<Configure>", self._on_resize)
         self._update_loop()
 
     # -- OCR plumbing ---------------------------------------------------------
@@ -95,7 +107,8 @@ class OCRApp:
 
     def _build_ui(self) -> None:
         self.root.title("Real-Time OCR (EasyOCR)")
-        self.root.resizable(True, True)
+        self.root.minsize(900, 600)
+        maximize_window(self.root)
 
         header = ttkb.Frame(self.root, padding=(16, 12))
         header.pack(fill=tk.X)
@@ -109,16 +122,25 @@ class OCRApp:
         main = ttkb.Frame(self.root, padding=12)
         main.pack(fill=tk.BOTH, expand=True)
         main.rowconfigure(0, weight=1)
-        main.columnconfigure(0, weight=3)  # video panel gets most of any extra space
-        main.columnconfigure(1, weight=1)  # sidebar grows too, but stays narrower
+        main.columnconfigure(0, weight=1)  # video panel takes the remaining width
+        main.columnconfigure(1, minsize=SIDEBAR_WIDTH_PX)  # sidebar keeps a fixed width
+        # Geometry propagation OFF is what keeps this layout stable. Otherwise
+        # the rendered image's size becomes the label's requested size, which
+        # becomes the frame's, which grows the window, which enlarges the
+        # panel, which enlarges the next rendered image -- the window creeps
+        # bigger every frame. With propagation off, sizes flow strictly one
+        # way: window -> panels -> image.
+        main.grid_propagate(False)
 
         self.video_frame = ttkb.Frame(main, bootstyle="dark", padding=4)
         self.video_frame.grid(row=0, column=0, padx=(0, 12), sticky="nsew")
-        self.video_label = ttkb.Label(self.video_frame)
-        self.video_label.pack(expand=True)
+        self.video_frame.pack_propagate(False)
+        self.video_label = ttkb.Label(self.video_frame, anchor="center")
+        self.video_label.pack(fill=tk.BOTH, expand=True)
 
-        self.sidebar = ttkb.Frame(main)
+        self.sidebar = ttkb.Frame(main, width=SIDEBAR_WIDTH_PX)
         self.sidebar.grid(row=0, column=1, sticky="nsew")
+        self.sidebar.pack_propagate(False)
         sidebar = self.sidebar
 
         status_row = ttkb.Frame(sidebar)
@@ -138,54 +160,20 @@ class OCRApp:
 
         ttkb.Label(sidebar, text="Detections", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(14, 4))
 
-        # A modest placeholder height; _sync_log_height() below replaces this
-        # with a value measured against the actual rendered video panel, once
-        # there's a real frame to measure against.
-        self.log_font = ("Consolas", 9)
+        # width/height here are just a minimum request -- pack(expand=True)
+        # stretches the log to fill whatever height the sidebar has. Deriving
+        # a line count from the video panel's height (an earlier approach)
+        # fed the sidebar's requested size back into the window size, which
+        # made the window creep larger on every frame.
         self.log = scrolledtext.ScrolledText(
-            sidebar, width=44, height=12, state="disabled", wrap="word",
-            font=self.log_font, borderwidth=0,
+            sidebar, width=10, height=5, state="disabled", wrap="word",
+            font=("Consolas", 9), borderwidth=0,
             bg=self.colors.bg, fg=self.colors.fg, insertbackground=self.colors.fg,
         )
         self.log.pack(fill=tk.BOTH, expand=True)
         for tag, color_name in LOG_TAG_COLORS.items():
             if color_name:
                 self.log.tag_configure(tag, foreground=getattr(self.colors, color_name))
-        self._log_height_synced = False
-
-    def _sync_log_height(self, attempts_left: int = 20) -> None:
-        """Resize the log to match the video panel's actual rendered height.
-
-        Estimating this from font metrics alone was fragile -- DPI scaling
-        and widget padding aren't predictable in advance -- so instead this
-        measures the real, already-laid-out geometry once a frame exists.
-
-        winfo_height() reports 1 (not real geometry) until a widget has
-        actually been mapped on screen at least once, so this retries for a
-        bit rather than risk computing a target height from that placeholder.
-        """
-        self.root.update_idletasks()
-        video_px = self.video_frame.winfo_height()
-        sidebar_px = self.sidebar.winfo_height()
-        log_px = self.log.winfo_height()
-
-        if attempts_left > 0 and (video_px <= 1 or sidebar_px <= 1 or log_px <= 1):
-            self.root.after(30, lambda: self._sync_log_height(attempts_left - 1))
-            return
-
-        overhead_px = sidebar_px - log_px
-        target_log_px = max(video_px - overhead_px, 100)
-        line_height_px = tkfont.Font(font=self.log_font).metrics("linespace")
-        self.log.configure(height=max(target_log_px // line_height_px, 6))
-
-    def _on_resize(self, event: tk.Event) -> None:
-        if event.widget is not self.root:
-            return
-        # <Configure> fires continuously while dragging a resize handle;
-        # debounce so we only recompute once the window settles.
-        if self._resize_after_id is not None:
-            self.root.after_cancel(self._resize_after_id)
-        self._resize_after_id = self.root.after(150, self._sync_log_height)
 
     def _append_log(self, text: str, tag: str = "live") -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -241,10 +229,6 @@ class OCRApp:
         imgtk = ImageTk.PhotoImage(image=Image.fromarray(rgb))
         self.video_label.imgtk = imgtk  # keep a reference so it isn't garbage collected
         self.video_label.configure(image=imgtk)
-
-        if not self._log_height_synced:
-            self._log_height_synced = True
-            self.root.after_idle(self._sync_log_height)
 
     # -- one-off high-accuracy actions -------------------------------------------
 
