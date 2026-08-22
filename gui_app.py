@@ -373,10 +373,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--allowlist", type=str, default=None,
-        help="Restrict recognition to these characters. A large accuracy win "
-             "when the text has a known format -- e.g. --allowlist '0123456789:/' "
-             "for a clock read '3:32' at 1.00 confidence where the unrestricted "
-             "model returned '3.32'.",
+        help="Restrict recognition to these characters. This FORCES the output "
+             "into the allowed set rather than just filtering it, so match it to "
+             "the text you are pointing at: '0123456789:' reads a clock correctly "
+             "(the model otherwise renders the colon as a period) but turns the "
+             "decimal in '3.32' into '332'. See the README's accuracy notes.",
     )
     parser.add_argument(
         "--no-stabilize", dest="stabilize", action="store_false",

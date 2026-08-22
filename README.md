@@ -102,9 +102,29 @@ Some measured findings, since a few of them are counterintuitive:
 
 **`mag_ratio` recovers small glyphs, at a cost.** Raising EasyOCR's pre-detection magnification is what makes the difference between a clock reading `332` and `3:32` — the colon is small enough to be dropped entirely at the default. It costs time roughly in proportion (1.7s → 5.8s on a 1280px frame), so the live loop leaves it at 1.0 and only the one-off **Get OCR** / **Load Image** paths raise it to 2.0. On the CLI it is `--mag-ratio`, which suits `--image` far more than the webcam.
 
-**Restricting the character set is the single biggest win for known formats.** Unconstrained, a clock face read `3.32` (colon → period, 0.78). With `--allowlist '0123456789:'` it read `3:32` at **1.00**. Use it whenever you know the shape of the text — clocks, licence plates, meter readings, serial numbers.
+**Restricting the character set helps a lot, but it is a format-specific override, not a general fix.** `--allowlist` doesn't merely filter the output — it *forces* the recognizer to choose from the allowed characters, so anything you leave out gets rendered as whatever is left.
 
-**Punctuation is supported.** The English model's character set includes ``!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~`` and it does read them (`POND'S: $5.99 (50% off!)` comes back essentially intact on a clean frame). If punctuation seems to go missing the causes are usually one of the above — a mark too small to survive the default `mag_ratio`, or an unconstrained charset picking a similar-looking character — plus the confidence threshold, since punctuated strings tend to score lower overall (try `--min-confidence 0.25`). For other scripts, pass the language: `--lang en ur`, `--lang ch_sim`, etc.
+That matters because the model cannot reliably distinguish `:` from `.` at these glyph sizes, and it leans heavily toward `.`:
+
+| Actual text | No allowlist | `0123456789:` (no `.`) | `0123456789:.` (both) |
+|---|---|---|---|
+| `3:32` | `3.32` ✗ | **`3:32`** ✓ | `3.32` ✗ |
+| `12:45` | `12.45` ✗ | **`12:45`** ✓ | `12.45` ✗ |
+| `3.32` | `3.32` ✓ | `332` ✗ | **`3.32`** ✓ |
+| `$5.99` | `S5.99` ✗ | `55299` ✗ | `55.99` ✗ |
+
+Read the middle column against the last one: the clock only reads correctly because the period was *banned*. Allow both and the period bias wins every time. And the reverse holds — a colon-only allowlist mangles a genuine decimal (`3.32` → `332`).
+
+So pick the allowlist to match the text you are actually pointing at:
+
+```bash
+python gui_app.py --allowlist "0123456789:"    # clocks, timetables
+python gui_app.py --allowlist "0123456789.$,"  # prices, meter readings
+```
+
+For mixed content containing both — a receipt with times *and* prices — there is no allowlist that wins, and you are left with the model's period bias. The same lookalike problem affects other pairs (`$` → `S` in the table above, `0`/`O`, `1`/`l`); an allowlist that excludes one of the pair is the only reliable lever.
+
+**Punctuation is supported, but small marks are the least reliable thing here.** The English model's character set includes ``!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~`` and on a clean frame it reads them well — `POND'S: $5.99 (50% off!)` comes back essentially intact. When punctuation goes missing it is usually one of the causes above: a mark too small to survive the default `mag_ratio`, a lookalike substitution, or the confidence threshold, since punctuated strings score lower overall (try `--min-confidence 0.25`). Distinguishing marks that differ only by a few pixels — `:` vs `.` especially — is a genuine limitation of the recognizer rather than something the pipeline can tune away; the allowlist is a way to sidestep it when you know the format, not a way to solve it. For other scripts, pass the language: `--lang en ur`, `--lang ch_sim`, etc.
 
 **Per-frame OCR disagrees with itself, so the live view is smoothed.** Each frame is recognised independently, so a stationary clock produced a different reading roughly every second — `822`, `8/22`, `8122`, `8*22`, `8 22` — none of them wrong exactly, just inconsistent. The live view now aggregates detections over a ~2 second window, groups them by position on screen, and shows the reading that wins a confidence-weighted vote. Steady text reads steadily, and one-frame garbage drops out for lack of support. `--no-stabilize` turns it off for raw, instant, noisier output.
 
