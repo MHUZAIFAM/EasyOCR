@@ -10,8 +10,9 @@ import numpy as np
 import pytest
 
 tk = pytest.importorskip("tkinter")  # skip this whole file if Tk isn't installed
+ttkb = pytest.importorskip("ttkbootstrap")  # and if ttkbootstrap isn't installed
 
-import gui_app  # noqa: E402 (must come after the importorskip guard above)
+import gui_app  # noqa: E402 (must come after the importorskip guards above)
 
 
 class FakeCapture:
@@ -39,7 +40,7 @@ class FakeEngine:
 @pytest.fixture
 def tk_root():
     try:
-        root = tk.Tk()
+        root = ttkb.Window(themename="tokyo-night-dark")
         root.withdraw()
     except tk.TclError:
         pytest.skip("no display available for Tk")

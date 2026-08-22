@@ -79,12 +79,14 @@ python gui_app.py
 python gui_app.py --camera 1 --gpu
 ```
 
-A desktop window (Tkinter, no extra install beyond `requirements.txt`) with:
+A styled desktop window ([ttkbootstrap](https://ttkbootstrap.readthedocs.io/), Tokyo Night dark theme) with:
 
 - **Center**: the live annotated feed, same detection loop as the CLI.
-- **Sidebar**: current FPS, and a timestamped log of everything detected.
+- **Sidebar**: current FPS with a status indicator, and a timestamped, color-coded log of everything detected (green for captures, blue for loaded images, default for live).
 - **Get OCR (capture frame)**: freezes the current frame and re-runs OCR on it at full resolution — no downscaling — trading the live loop's speed for the best accuracy that single frame can get. Result opens in a popup and is logged as `(capture)`.
 - **Load Image...**: pick any file from disk and run the same full-accuracy OCR on it, independent of the camera. Result opens in a popup and is logged as `(image)`.
+
+The EasyOCR model (and the PyTorch it pulls in) can take several seconds to load. Rather than leave the window looking frozen during that, a loading screen appears immediately while the model loads on a background thread, then swaps in the real UI once it's ready.
 
 The GUI reuses the same `OCREngine`/`OCRWorker`/`preprocessing` modules as the CLI — it's a different front-end on the same pipeline, not a separate implementation. It also sidesteps the `opencv-python-headless` GUI conflict entirely, since Tkinter never touches OpenCV's own window backend.
 
@@ -113,7 +115,7 @@ tests/              Unit tests for the above
 
 ## Tech Stack
 
-Python, EasyOCR, PyTorch, OpenCV, Tkinter, Pillow, NumPy
+Python, EasyOCR, PyTorch, OpenCV, Tkinter, ttkbootstrap, Pillow, NumPy
 
 ## License
 

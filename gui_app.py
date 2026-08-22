@@ -1,4 +1,4 @@
-"""Tkinter UI for real-time OCR.
+"""Tkinter UI for real-time OCR (styled with ttkbootstrap).
 
 Layout: a live annotated camera feed in the center, with FPS and a running
 detection log on the right. Two extra actions live in the sidebar:
@@ -7,6 +7,10 @@ detection log on the right. Two extra actions live in the sidebar:
   resolution (no downscaling), trading the live loop's speed for accuracy
   on that one capture.
 - "Load Image...": runs the same full-accuracy OCR on a file from disk.
+
+The EasyOCR model loads in the background behind a splash screen, since
+loading it synchronously before the window appears made the app look frozen
+for several seconds on startup.
 
 Usage:
     python gui_app.py
@@ -19,10 +23,11 @@ import threading
 import time
 import tkinter as tk
 from datetime import datetime
-from tkinter import filedialog, scrolledtext, ttk
+from tkinter import filedialog, scrolledtext
 
 import cv2
 import numpy as np
+import ttkbootstrap as ttkb
 from PIL import Image, ImageTk
 
 from gui_helpers import resize_for_display, select_new_detections
@@ -32,14 +37,23 @@ from preprocessing import enhance_for_ocr
 from realtime_ocr import downscale_for_detection, draw_results
 
 FRAME_POLL_MS = 10
+THEME = "tokyo-night-dark"
+
+LOG_TAG_COLORS = {
+    "live": None,  # falls back to the theme's default foreground
+    "capture": "success",
+    "image": "info",
+    "system": "secondary",
+}
 
 
 class OCRApp:
-    def __init__(self, root: tk.Tk, engine: OCREngine, camera_index: int, enhance: bool, max_width: int):
+    def __init__(self, root: ttkb.Window, engine: OCREngine, camera_index: int, enhance: bool, max_width: int):
         self.root = root
         self.engine = engine
         self.enhance = enhance
         self.max_width = max_width
+        self.colors = ttkb.Style().colors
 
         self.cap = cv2.VideoCapture(camera_index)
         if not self.cap.isOpened():
@@ -61,7 +75,7 @@ class OCRApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._update_loop()
 
-    # -- OCR plumbing -----------------------------------------------------
+    # -- OCR plumbing ---------------------------------------------------------
 
     def _process_live_frame(self, frame: np.ndarray) -> Detections:
         small, scale = downscale_for_detection(frame, self.max_width)
@@ -72,40 +86,67 @@ class OCRApp:
             results = [(np.round(box * inv).astype(int), text, conf) for box, text, conf in results]
         return results
 
-    # -- UI construction ----------------------------------------------------
+    # -- UI construction --------------------------------------------------------
 
     def _build_ui(self) -> None:
         self.root.title("Real-Time OCR (EasyOCR)")
+        self.root.resizable(True, True)
 
-        main = ttk.Frame(self.root, padding=8)
+        header = ttkb.Frame(self.root, padding=(16, 12))
+        header.pack(fill=tk.X)
+        ttkb.Label(header, text="Real-Time OCR", font=("Segoe UI", 16, "bold")).pack(side=tk.LEFT)
+        ttkb.Label(
+            header, text="EasyOCR + OpenCV", bootstyle="secondary", font=("Segoe UI", 10)
+        ).pack(side=tk.LEFT, padx=(10, 0), pady=(4, 0))
+
+        ttkb.Separator(self.root).pack(fill=tk.X)
+
+        main = ttkb.Frame(self.root, padding=12)
         main.pack(fill=tk.BOTH, expand=True)
 
-        self.video_label = ttk.Label(main)
-        self.video_label.grid(row=0, column=0, padx=(0, 10), sticky="n")
+        video_frame = ttkb.Frame(main, bootstyle="dark", padding=4)
+        video_frame.grid(row=0, column=0, padx=(0, 12), sticky="n")
+        self.video_label = ttkb.Label(video_frame)
+        self.video_label.pack()
 
-        sidebar = ttk.Frame(main)
-        sidebar.grid(row=0, column=1, sticky="n")
+        sidebar = ttkb.Frame(main)
+        sidebar.grid(row=0, column=1, sticky="nsew")
+        main.columnconfigure(1, weight=1)
 
+        status_row = ttkb.Frame(sidebar)
+        status_row.pack(fill=tk.X, pady=(0, 12))
+        ttkb.Label(status_row, text="●", bootstyle="success", font=("Segoe UI", 12)).pack(side=tk.LEFT)
         self.fps_var = tk.StringVar(value="FPS: --")
-        ttk.Label(sidebar, textvariable=self.fps_var, font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0, 10))
-
-        ttk.Button(sidebar, text="Get OCR (capture frame)", command=self.capture_and_run_ocr).pack(
-            fill=tk.X, pady=2
+        ttkb.Label(status_row, textvariable=self.fps_var, font=("Segoe UI", 14, "bold")).pack(
+            side=tk.LEFT, padx=(6, 0)
         )
-        ttk.Button(sidebar, text="Load Image...", command=self.load_image_and_run_ocr).pack(fill=tk.X, pady=2)
 
-        ttk.Label(sidebar, text="Detections:").pack(anchor="w", pady=(12, 2))
-        self.log = scrolledtext.ScrolledText(sidebar, width=40, height=26, state="disabled", wrap="word")
+        ttkb.Button(
+            sidebar, text="Get OCR (capture frame)", bootstyle="primary", command=self.capture_and_run_ocr
+        ).pack(fill=tk.X, pady=3)
+        ttkb.Button(
+            sidebar, text="Load Image...", bootstyle="secondary-outline", command=self.load_image_and_run_ocr
+        ).pack(fill=tk.X, pady=3)
+
+        ttkb.Label(sidebar, text="Detections", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(14, 4))
+        self.log = scrolledtext.ScrolledText(
+            sidebar, width=44, height=26, state="disabled", wrap="word",
+            font=("Consolas", 9), borderwidth=0,
+            bg=self.colors.bg, fg=self.colors.fg, insertbackground=self.colors.fg,
+        )
         self.log.pack(fill=tk.BOTH, expand=True)
+        for tag, color_name in LOG_TAG_COLORS.items():
+            if color_name:
+                self.log.tag_configure(tag, foreground=getattr(self.colors, color_name))
 
-    def _append_log(self, text: str) -> None:
+    def _append_log(self, text: str, tag: str = "live") -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log.configure(state="normal")
-        self.log.insert(tk.END, f"[{timestamp}] {text}\n")
+        self.log.insert(tk.END, f"[{timestamp}] {text}\n", tag)
         self.log.see(tk.END)
         self.log.configure(state="disabled")
 
-    # -- live loop ----------------------------------------------------------
+    # -- live loop ----------------------------------------------------------------
 
     def _update_loop(self) -> None:
         ok, frame = self.cap.read()
@@ -121,7 +162,7 @@ class OCRApp:
 
             new_results, self.logged_texts = select_new_detections(results, self.logged_texts)
             for _, text, conf in new_results:
-                self._append_log(f"(live) {text} ({conf:.2f})")
+                self._append_log(f"(live) {text} ({conf:.2f})", tag="live")
 
             annotated = draw_results(frame.copy(), results)
             self._render(annotated)
@@ -144,13 +185,13 @@ class OCRApp:
         self.video_label.imgtk = imgtk  # keep a reference so it isn't garbage collected
         self.video_label.configure(image=imgtk)
 
-    # -- one-off high-accuracy actions ---------------------------------------
+    # -- one-off high-accuracy actions -------------------------------------------
 
     def capture_and_run_ocr(self) -> None:
         if self.latest_frame is None:
             return
         frame = self.latest_frame.copy()
-        self._append_log("Capturing frame for high-accuracy OCR...")
+        self._append_log("Capturing frame for high-accuracy OCR...", tag="system")
 
         def work():
             processed = enhance_for_ocr(frame) if self.enhance else frame
@@ -161,10 +202,10 @@ class OCRApp:
 
     def _show_capture_results(self, frame: np.ndarray, results: Detections) -> None:
         if not results:
-            self._append_log("(capture) no text detected")
+            self._append_log("(capture) no text detected", tag="capture")
             return
         for _, text, conf in results:
-            self._append_log(f"(capture) {text} ({conf:.2f})")
+            self._append_log(f"(capture) {text} ({conf:.2f})", tag="capture")
         self._show_popup(draw_results(frame.copy(), results), title="Captured Frame Result")
 
     def load_image_and_run_ocr(self) -> None:
@@ -177,10 +218,10 @@ class OCRApp:
 
         frame = cv2.imread(path)
         if frame is None:
-            self._append_log(f"(image) could not read {path}")
+            self._append_log(f"could not read {path}", tag="system")
             return
 
-        self._append_log(f"Running OCR on {path}...")
+        self._append_log(f"Running OCR on {path}...", tag="system")
 
         def work():
             processed = enhance_for_ocr(frame) if self.enhance else frame
@@ -191,19 +232,19 @@ class OCRApp:
 
     def _show_image_results(self, frame: np.ndarray, results: Detections, path: str) -> None:
         if not results:
-            self._append_log(f"(image) no text detected in {path}")
+            self._append_log(f"(image) no text detected in {path}", tag="image")
             return
         for _, text, conf in results:
-            self._append_log(f"(image) {text} ({conf:.2f})")
+            self._append_log(f"(image) {text} ({conf:.2f})", tag="image")
         self._show_popup(draw_results(frame.copy(), results), title=f"Image Result: {path}")
 
     def _show_popup(self, frame: np.ndarray, title: str) -> None:
-        popup = tk.Toplevel(self.root)
+        popup = ttkb.Toplevel(self.root)
         popup.title(title)
         display_frame = resize_for_display(frame, max_width=900)
         rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
         imgtk = ImageTk.PhotoImage(image=Image.fromarray(rgb))
-        label = ttk.Label(popup, image=imgtk)
+        label = ttkb.Label(popup, image=imgtk)
         label.imgtk = imgtk
         label.pack()
 
@@ -230,12 +271,40 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _show_splash(root: ttkb.Window) -> ttkb.Frame:
+    root.title("Real-Time OCR (EasyOCR)")
+    root.resizable(False, False)
+
+    splash = ttkb.Frame(root, padding=48)
+    splash.pack(fill=tk.BOTH, expand=True)
+    ttkb.Label(splash, text="Real-Time OCR", font=("Segoe UI", 20, "bold")).pack(pady=(0, 8))
+    ttkb.Label(
+        splash, text="Loading EasyOCR model...\nThis can take a while on first run.",
+        justify=tk.CENTER, bootstyle="secondary",
+    ).pack(pady=(0, 16))
+    progress = ttkb.Progressbar(splash, mode="indeterminate", bootstyle="info-striped", length=260)
+    progress.pack()
+    progress.start(12)
+    return splash
+
+
 def main() -> None:
     args = parse_args()
-    engine = OCREngine(languages=args.lang, use_gpu=args.gpu, min_confidence=args.min_confidence)
 
-    root = tk.Tk()
-    OCRApp(root, engine, args.camera, args.enhance, args.max_width)
+    root = ttkb.Window(themename=THEME)
+    splash = _show_splash(root)
+
+    state = {}
+
+    def load_engine():
+        state["engine"] = OCREngine(languages=args.lang, use_gpu=args.gpu, min_confidence=args.min_confidence)
+        root.after(0, launch_app)
+
+    def launch_app():
+        splash.destroy()
+        OCRApp(root, state["engine"], args.camera, args.enhance, args.max_width)
+
+    threading.Thread(target=load_engine, daemon=True).start()
     root.mainloop()
 
 
