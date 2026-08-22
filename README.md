@@ -29,9 +29,13 @@ See [`preprocessing.py`](preprocessing.py) for the enhancement pipeline and [`oc
 git clone https://github.com/MHUZAIFAM/EasyOCR.git
 cd EasyOCR
 pip install -r requirements.txt
+pip uninstall -y opencv-python-headless
+pip install --force-reinstall opencv-python
 ```
 
 > EasyOCR pulls in PyTorch. For CPU-only machines, installing `torch` from the [CPU wheel index](https://pytorch.org/get-started/locally/) first is usually faster than the default GPU build.
+
+> **Why the extra two lines:** EasyOCR depends on `opencv-python-headless`, which has no GUI backend. Installing it can silently overwrite the GUI-capable `opencv-python` this project needs for the live webcam window (both packages ship a `cv2` module under the same name, so pip has no idea they conflict). Re-running these two lines after *any* reinstall of `requirements.txt` fixes it. If you skip this and the window fails to open, `realtime_ocr.py` will detect it and print this exact fix instead of a cryptic OpenCV traceback.
 
 ## Usage
 

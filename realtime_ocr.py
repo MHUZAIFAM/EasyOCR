@@ -66,7 +66,30 @@ def run_on_image(engine: OCREngine, path: str, enhance: bool, output: str = None
     print(f"Saved annotated result to {out_path}")
 
 
+GUI_FIX_HINT = (
+    "OpenCV was built without GUI support, so the live window can't open.\n"
+    "This happens when 'opencv-python-headless' gets installed alongside\n"
+    "'opencv-python' -- EasyOCR depends on the headless build, and installing\n"
+    "or upgrading it can silently overwrite the GUI-capable one.\n\n"
+    "Fix:\n"
+    "  pip uninstall -y opencv-python-headless\n"
+    "  pip install --force-reinstall opencv-python\n"
+)
+
+
+def check_gui_support() -> None:
+    """Fail fast with an actionable message instead of a cryptic traceback
+    mid-loop when opencv-python-headless has clobbered the GUI build."""
+    try:
+        cv2.namedWindow("_gui_check", cv2.WINDOW_NORMAL)
+        cv2.destroyWindow("_gui_check")
+    except cv2.error as e:
+        raise SystemExit(GUI_FIX_HINT) from e
+
+
 def run_on_webcam(engine: OCREngine, camera_index: int, enhance: bool, max_width: int) -> None:
+    check_gui_support()
+
     cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
         raise RuntimeError(f"Could not open camera index {camera_index}")

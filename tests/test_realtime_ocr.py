@@ -1,6 +1,10 @@
-import numpy as np
+from unittest.mock import patch
 
-from realtime_ocr import downscale_for_detection, draw_results
+import cv2
+import numpy as np
+import pytest
+
+from realtime_ocr import check_gui_support, downscale_for_detection, draw_results
 
 
 def test_downscale_leaves_small_frames_untouched():
@@ -48,3 +52,14 @@ def test_draw_results_handles_empty_detections():
     frame = np.zeros((100, 100, 3), dtype=np.uint8)
     annotated = draw_results(frame.copy(), [])
     assert np.array_equal(annotated, frame)
+
+
+def test_check_gui_support_raises_actionable_error_when_headless():
+    with patch("realtime_ocr.cv2.namedWindow", side_effect=cv2.error("not implemented")):
+        with pytest.raises(SystemExit, match="opencv-python-headless"):
+            check_gui_support()
+
+
+def test_check_gui_support_passes_silently_with_working_gui():
+    with patch("realtime_ocr.cv2.namedWindow"), patch("realtime_ocr.cv2.destroyWindow"):
+        check_gui_support()  # should not raise
