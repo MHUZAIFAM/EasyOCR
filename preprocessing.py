@@ -43,7 +43,11 @@ def enhance_for_ocr(frame: np.ndarray, target_brightness: float = 130.0) -> np.n
         frame = gamma_correct(frame, gamma)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    gray = apply_clahe(gray)
+    # CLAHE degenerates on near-flat regions (e.g. a blown-out glare patch):
+    # with almost no variance to redistribute, histogram equalization can
+    # push the whole region to full white instead of leaving it alone.
+    if gray.std() > 2.0:
+        gray = apply_clahe(gray)
 
     if brightness < 60:
         gray = denoise(gray)

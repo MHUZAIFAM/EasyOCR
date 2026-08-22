@@ -8,17 +8,22 @@ publishes results the main loop can read without waiting.
 """
 
 import threading
-from typing import Callable, List, Tuple
+import time
+from typing import Callable, Optional
 
 import numpy as np
 
+from ocr_engine import Detections
+
+IDLE_POLL_SECONDS = 0.005
+
 
 class OCRWorker:
-    def __init__(self, process_frame: Callable[[np.ndarray], List[Tuple[np.ndarray, str, float]]]):
+    def __init__(self, process_frame: Callable[[np.ndarray], Detections]):
         self._process_frame = process_frame
         self._lock = threading.Lock()
-        self._pending_frame: np.ndarray | None = None
-        self._results: List[Tuple[np.ndarray, str, float]] = []
+        self._pending_frame: Optional[np.ndarray] = None
+        self._results: Detections = []
         self._running = False
         self._thread = threading.Thread(target=self._loop, daemon=True)
 
@@ -34,7 +39,7 @@ class OCRWorker:
         with self._lock:
             self._pending_frame = frame
 
-    def latest_results(self) -> List[Tuple[np.ndarray, str, float]]:
+    def latest_results(self) -> Detections:
         with self._lock:
             return self._results
 
@@ -45,7 +50,7 @@ class OCRWorker:
                 self._pending_frame = None
 
             if frame is None:
-                threading.Event().wait(0.005)
+                time.sleep(IDLE_POLL_SECONDS)
                 continue
 
             results = self._process_frame(frame)

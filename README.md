@@ -1,5 +1,7 @@
 # Real-Time OCR with EasyOCR
 
+[![CI](https://github.com/MHUZAIFAM/EasyOCR/actions/workflows/ci.yml/badge.svg)](https://github.com/MHUZAIFAM/EasyOCR/actions/workflows/ci.yml)
+
 A real-time text recognition system that reads text straight from a live camera feed using [EasyOCR](https://github.com/JaidedAI/EasyOCR) and OpenCV, with adaptive preprocessing so it keeps working under extreme lighting and poor visibility (very dark rooms, backlighting, glare/washout).
 
 ## Features
@@ -64,6 +66,27 @@ python realtime_ocr.py --max-width 960
 ```
 
 Press `q` to quit the live window.
+
+## Testing
+
+The preprocessing, downscaling, and threading logic are covered by unit tests that don't need a webcam or GPU:
+
+```bash
+pip install -r requirements-dev.txt
+pytest -v
+```
+
+CI runs this same suite on every push (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+
+## Project structure
+
+```
+realtime_ocr.py    CLI entry point: webcam/image loop, downscaling, drawing
+ocr_engine.py       EasyOCR wrapper (detector + recognizer)
+ocr_worker.py       Background thread that decouples OCR speed from display FPS
+preprocessing.py    Lighting-robust preprocessing (gamma correction, CLAHE, denoising)
+tests/              Unit tests for the above
+```
 
 ## Tech Stack
 

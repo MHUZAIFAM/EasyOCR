@@ -13,16 +13,17 @@ smooth instead of freezing every time a detection pass runs.
 
 import argparse
 import time
+from typing import Tuple
 
 import cv2
 import numpy as np
 
-from ocr_engine import OCREngine
+from ocr_engine import Detections, OCREngine
 from ocr_worker import OCRWorker
 from preprocessing import enhance_for_ocr
 
 
-def downscale_for_detection(frame: np.ndarray, max_width: int):
+def downscale_for_detection(frame: np.ndarray, max_width: int) -> Tuple[np.ndarray, float]:
     """Shrink the frame before OCR to cut inference time; EasyOCR's cost
     scales with pixel count, so this matters far more than skipping frames.
     Returns the (possibly) resized frame and the scale factor to map
@@ -36,7 +37,7 @@ def downscale_for_detection(frame: np.ndarray, max_width: int):
     return resized, scale
 
 
-def draw_results(frame: np.ndarray, results) -> np.ndarray:
+def draw_results(frame: np.ndarray, results: Detections) -> np.ndarray:
     for box, text, conf in results:
         cv2.polylines(frame, [box], isClosed=True, color=(0, 255, 0), thickness=2)
         x, y = box[0]
