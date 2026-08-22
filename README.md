@@ -4,10 +4,10 @@ A real-time text recognition system that reads text straight from a live camera 
 
 ## Features
 
-- **Live webcam OCR** — detects and overlays text with bounding boxes and confidence scores in real time.
+- **Live webcam OCR** — detects and overlays text with bounding boxes and confidence scores in real time, with the video feed staying smooth instead of freezing during detection.
 - **Lighting-robust preprocessing** — automatic gamma correction based on measured frame brightness, plus CLAHE contrast enhancement and denoising for low-light frames.
 - **Single-image mode** — run the same pipeline on a static image, useful for testing or batch processing without a camera.
-- **Configurable** — camera index, OCR languages, GPU usage, confidence threshold, and detection frequency (to trade accuracy for FPS) are all CLI flags.
+- **Configurable** — camera index, OCR languages, GPU usage, confidence threshold, and detection resolution are all CLI flags.
 
 ## How it works
 
@@ -16,6 +16,8 @@ A real-time text recognition system that reads text straight from a live camera 
 3. Apply CLAHE (adaptive histogram equalization) to boost local contrast, and denoise if the frame is still dark.
 4. Run the corrected frame through EasyOCR's detector + recognizer.
 5. Draw bounding boxes, recognized text, and confidence scores back on the original frame.
+
+EasyOCR's CPU inference (roughly 1 FPS) is much slower than camera capture (tens to hundreds of FPS). Running both on the same thread would make the video stutter every time a detection pass ran, so OCR instead runs on a background thread ([`ocr_worker.py`](ocr_worker.py)) that always works on the most recent frame and publishes results the display loop reads without blocking — video stays smooth, and the on-screen text just refreshes whenever the next detection finishes.
 
 See [`preprocessing.py`](preprocessing.py) for the enhancement pipeline and [`ocr_engine.py`](ocr_engine.py) for the EasyOCR wrapper.
 
@@ -55,10 +57,10 @@ Disable the lighting preprocessing (to compare raw vs. enhanced accuracy):
 python realtime_ocr.py --no-enhance
 ```
 
-Run detection every 3rd frame for higher FPS on slower machines:
+Trade detection accuracy for speed by shrinking frames further before OCR (default is 640px wide, 0 disables downscaling):
 
 ```bash
-python realtime_ocr.py --detect-every 3
+python realtime_ocr.py --max-width 960
 ```
 
 Press `q` to quit the live window.

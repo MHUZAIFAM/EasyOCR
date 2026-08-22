@@ -6,6 +6,9 @@ Usage:
     python realtime_ocr.py --camera 1      # a different camera
     python realtime_ocr.py --image path.jpg  # single image, no webcam needed
     python realtime_ocr.py --no-enhance    # disable lighting preprocessing
+
+OCR runs on a background thread (see ocr_worker.py) so the video stays
+smooth instead of freezing every time a detection pass runs.
 """
 
 import argparse
@@ -15,6 +18,7 @@ import cv2
 import numpy as np
 
 from ocr_engine import OCREngine
+from ocr_worker import OCRWorker
 from preprocessing import enhance_for_ocr
 
 
@@ -61,15 +65,24 @@ def run_on_image(engine: OCREngine, path: str, enhance: bool, output: str = None
     print(f"Saved annotated result to {out_path}")
 
 
-def run_on_webcam(engine: OCREngine, camera_index: int, enhance: bool, detect_every: int, max_width: int) -> None:
+def run_on_webcam(engine: OCREngine, camera_index: int, enhance: bool, max_width: int) -> None:
     cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
         raise RuntimeError(f"Could not open camera index {camera_index}")
 
-    results = []
-    frame_count = 0
-    prev_time = time.time()
+    def process_frame(frame):
+        small, scale = downscale_for_detection(frame, max_width)
+        processed = enhance_for_ocr(small) if enhance else small
+        results = engine.read(processed)
+        if scale != 1.0:
+            inv = 1.0 / scale
+            results = [(np.round(box * inv).astype(int), text, conf) for box, text, conf in results]
+        return results
 
+    worker = OCRWorker(process_frame)
+    worker.start()
+
+    prev_time = time.time()
     print("Press 'q' to quit.")
     try:
         while True:
@@ -78,15 +91,8 @@ def run_on_webcam(engine: OCREngine, camera_index: int, enhance: bool, detect_ev
                 print("Frame grab failed, stopping.")
                 break
 
-            if frame_count % detect_every == 0:
-                small, scale = downscale_for_detection(frame, max_width)
-                processed = enhance_for_ocr(small) if enhance else small
-                results = engine.read(processed)
-                if scale != 1.0:
-                    inv = 1.0 / scale
-                    results = [(np.round(box * inv).astype(int), text, conf) for box, text, conf in results]
-
-            annotated = draw_results(frame.copy(), results)
+            worker.submit(frame)
+            annotated = draw_results(frame.copy(), worker.latest_results())
 
             now = time.time()
             fps = 1.0 / max(now - prev_time, 1e-6)
@@ -97,11 +103,11 @@ def run_on_webcam(engine: OCREngine, camera_index: int, enhance: bool, detect_ev
             )
 
             cv2.imshow("Real-Time OCR (EasyOCR)", annotated)
-            frame_count += 1
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
     finally:
+        worker.stop()
         cap.release()
         cv2.destroyAllWindows()
 
@@ -115,7 +121,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpu", action="store_true", help="Use GPU if available")
     parser.add_argument("--min-confidence", type=float, default=0.4, help="Drop detections below this confidence")
     parser.add_argument("--no-enhance", dest="enhance", action="store_false", help="Disable lighting preprocessing")
-    parser.add_argument("--detect-every", type=int, default=1, help="Run OCR every N frames (webcam mode, for speed)")
     parser.add_argument(
         "--max-width", type=int, default=640,
         help="Downscale frames to this width before OCR to speed up CPU inference (0 disables)",
@@ -131,7 +136,7 @@ def main() -> None:
     if args.image:
         run_on_image(engine, args.image, args.enhance, args.output)
     else:
-        run_on_webcam(engine, args.camera, args.enhance, max(args.detect_every, 1), args.max_width)
+        run_on_webcam(engine, args.camera, args.enhance, args.max_width)
 
 
 if __name__ == "__main__":
