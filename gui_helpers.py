@@ -27,3 +27,21 @@ def resize_for_display(frame: np.ndarray, max_width: int = 800) -> np.ndarray:
         return frame
     scale = max_width / w
     return cv2.resize(frame, (max_width, int(h * scale)), interpolation=cv2.INTER_AREA)
+
+
+def fit_frame_to_box(frame: np.ndarray, box_width: int, box_height: int) -> np.ndarray:
+    """Scale a frame up or down (preserving aspect ratio) to fit within a
+    box -- e.g. the live video panel, which should grow to fill the window
+    on maximize rather than stay pinned at its original capture size.
+
+    Purely cosmetic, like resize_for_display: never touches the resolution
+    OCR actually runs on, only what gets drawn on screen."""
+    h, w = frame.shape[:2]
+    if box_width <= 0 or box_height <= 0 or h <= 0 or w <= 0:
+        return frame
+    scale = min(box_width / w, box_height / h)
+    if scale <= 0:
+        return frame
+    new_w, new_h = max(int(w * scale), 1), max(int(h * scale), 1)
+    interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+    return cv2.resize(frame, (new_w, new_h), interpolation=interpolation)

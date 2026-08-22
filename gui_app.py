@@ -31,7 +31,7 @@ import numpy as np
 import ttkbootstrap as ttkb
 from PIL import Image, ImageTk
 
-from gui_helpers import resize_for_display, select_new_detections
+from gui_helpers import fit_frame_to_box, resize_for_display, select_new_detections
 from ocr_engine import Detections, OCREngine
 from ocr_worker import OCRWorker
 from preprocessing import enhance_for_ocr
@@ -73,8 +73,11 @@ class OCRApp:
         self.worker = OCRWorker(self._process_live_frame)
         self.worker.start()
 
+        self._resize_after_id: str = None
+
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.root.bind("<Configure>", self._on_resize)
         self._update_loop()
 
     # -- OCR plumbing ---------------------------------------------------------
@@ -105,15 +108,17 @@ class OCRApp:
 
         main = ttkb.Frame(self.root, padding=12)
         main.pack(fill=tk.BOTH, expand=True)
+        main.rowconfigure(0, weight=1)
+        main.columnconfigure(0, weight=3)  # video panel gets most of any extra space
+        main.columnconfigure(1, weight=1)  # sidebar grows too, but stays narrower
 
         self.video_frame = ttkb.Frame(main, bootstyle="dark", padding=4)
-        self.video_frame.grid(row=0, column=0, padx=(0, 12), sticky="n")
+        self.video_frame.grid(row=0, column=0, padx=(0, 12), sticky="nsew")
         self.video_label = ttkb.Label(self.video_frame)
-        self.video_label.pack()
+        self.video_label.pack(expand=True)
 
         self.sidebar = ttkb.Frame(main)
         self.sidebar.grid(row=0, column=1, sticky="nsew")
-        main.columnconfigure(1, weight=1)
         sidebar = self.sidebar
 
         status_row = ttkb.Frame(sidebar)
@@ -173,6 +178,15 @@ class OCRApp:
         line_height_px = tkfont.Font(font=self.log_font).metrics("linespace")
         self.log.configure(height=max(target_log_px // line_height_px, 6))
 
+    def _on_resize(self, event: tk.Event) -> None:
+        if event.widget is not self.root:
+            return
+        # <Configure> fires continuously while dragging a resize handle;
+        # debounce so we only recompute once the window settles.
+        if self._resize_after_id is not None:
+            self.root.after_cancel(self._resize_after_id)
+        self._resize_after_id = self.root.after(150, self._sync_log_height)
+
     def _append_log(self, text: str, tag: str = "live") -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log.configure(state="normal")
@@ -213,7 +227,16 @@ class OCRApp:
             handler(*args)
 
     def _render(self, frame: np.ndarray) -> None:
-        display_frame = resize_for_display(frame)
+        # Scale into whatever size the video panel currently has, so the
+        # feed grows to fill the window on maximize/resize instead of
+        # staying pinned at its original capture resolution. Before the
+        # panel has ever been mapped, winfo_width/height() report 1 (a
+        # Tk placeholder, not real geometry); fall back to a sane default
+        # for that first frame or two.
+        box_w, box_h = self.video_frame.winfo_width(), self.video_frame.winfo_height()
+        if box_w <= 1 or box_h <= 1:
+            box_w, box_h = 800, 600
+        display_frame = fit_frame_to_box(frame, box_w - 8, box_h - 8)  # minus the frame's own padding
         rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
         imgtk = ImageTk.PhotoImage(image=Image.fromarray(rgb))
         self.video_label.imgtk = imgtk  # keep a reference so it isn't garbage collected
