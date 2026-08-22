@@ -26,7 +26,13 @@ class FakeCapture:
         return True, self._frame.copy()
 
     def get(self, prop):
-        return self._frame.shape[0]  # CAP_PROP_FRAME_HEIGHT
+        import cv2
+
+        if prop == cv2.CAP_PROP_FRAME_WIDTH:
+            return self._frame.shape[1]
+        if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+            return self._frame.shape[0]
+        return 0
 
     def release(self):
         pass
@@ -96,42 +102,21 @@ def test_capture_button_uses_full_resolution_and_logs_via_queue(tk_root):
             app.on_close()
 
 
-def test_video_panel_size_does_not_track_the_rendered_image(tk_root):
-    """Regression test for the window creeping larger on every frame.
+def test_feed_renders_at_a_fixed_size_regardless_of_window_size(tk_root):
+    """The feed renders at a size fixed at startup, not one derived from the
+    panel's current geometry.
 
-    The loop was: the rendered image sets the label's requested size, which
-    sets the video frame's requested size, which grows an auto-sizing
-    window, which enlarges the panel, which enlarges the next image.
+    This is also the regression test for the window creeping larger on every
+    frame. That bug was a feedback loop -- rendered image size set the
+    label's requested size, which set the panel's, which grew an auto-sizing
+    window, which enlarged the panel, which enlarged the next image. Because
+    the render size is now a startup constant, the loop cannot close: a
+    bigger window simply cannot produce a bigger image.
 
-    Asserting on the window's size directly is unreliable -- an explicit
-    geometry() pins it and hides the bug, while without one the growth
-    saturates against the screen before a test can sample it. So this
-    asserts the underlying invariant instead: with geometry propagation
-    off, the panel's *requested* size must stay independent of whatever
-    image is currently displayed in it.
+    Asserting on the window's size directly doesn't work -- an explicit
+    geometry() pins it and hides the bug, and without one the growth
+    saturates against the screen before a test can sample it.
     """
-    frame = np.full((480, 640, 3), 100, dtype=np.uint8)
-
-    with patch("gui_app.cv2.VideoCapture", return_value=FakeCapture(frame)):
-        app = gui_app.OCRApp(tk_root, FakeEngine([]), camera_index=0, enhance=True, max_width=640)
-        try:
-            pump(tk_root, seconds=0.3, step=0.01)
-            tk_root.update_idletasks()
-
-            image_width = app.video_label.imgtk.width()
-            requested_width = app.video_frame.winfo_reqwidth()
-
-            # Pre-fix this was image_width + the frame's 8px of padding.
-            assert requested_width < image_width, (
-                f"video panel requests {requested_width}px to hold a {image_width}px "
-                "image -- its size is tracking the image again, which re-creates "
-                "the window-growth feedback loop"
-            )
-        finally:
-            app.on_close()
-
-
-def test_video_image_scales_up_when_the_window_grows(tk_root):
     frame = np.full((480, 640, 3), 100, dtype=np.uint8)
 
     with patch("gui_app.cv2.VideoCapture", return_value=FakeCapture(frame)):
@@ -140,14 +125,51 @@ def test_video_image_scales_up_when_the_window_grows(tk_root):
             tk_root.state("normal")
             tk_root.geometry("1000x650")
             pump(tk_root, seconds=0.3, step=0.01)
-            small_width = app.video_label.imgtk.width()
+            width_in_small_window = app.video_label.imgtk.width()
 
-            tk_root.geometry("1400x900")
+            tk_root.geometry("1600x1000")
             pump(tk_root, seconds=0.3, step=0.01)
-            large_width = app.video_label.imgtk.width()
+            width_in_large_window = app.video_label.imgtk.width()
 
-            assert large_width > small_width, (
-                f"video did not scale up: {small_width}px -> {large_width}px"
+            assert width_in_small_window == width_in_large_window == app.display_width, (
+                f"feed size followed the window ({width_in_small_window}px -> "
+                f"{width_in_large_window}px); it must stay at the fixed "
+                f"{app.display_width}px or the growth feedback loop is back"
             )
+        finally:
+            app.on_close()
+
+
+def test_video_panel_hugs_the_feed_without_letterbox_bars(tk_root):
+    """The panel is sized to the feed, so there are no dead bars around it --
+    only the intended few pixels of border padding."""
+    frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+
+    with patch("gui_app.cv2.VideoCapture", return_value=FakeCapture(frame)):
+        app = gui_app.OCRApp(tk_root, FakeEngine([]), camera_index=0, enhance=True, max_width=640)
+        try:
+            pump(tk_root, seconds=0.3, step=0.01)
+            tk_root.update_idletasks()
+
+            allowed = 2 * gui_app.VIDEO_PADDING_PX
+            width_gap = app.video_frame.winfo_width() - app.video_label.imgtk.width()
+            height_gap = app.video_frame.winfo_height() - app.video_label.imgtk.height()
+
+            assert width_gap <= allowed, f"{width_gap / 2:.0f}px bars either side of the feed"
+            assert height_gap <= allowed, f"{height_gap / 2:.0f}px bars above/below the feed"
+        finally:
+            app.on_close()
+
+
+def test_display_size_follows_the_camera_aspect_ratio(tk_root):
+    """A 16:9 camera must not be squashed into a 4:3 panel (or vice versa)."""
+    widescreen = np.full((720, 1280, 3), 100, dtype=np.uint8)
+
+    with patch("gui_app.cv2.VideoCapture", return_value=FakeCapture(widescreen)):
+        app = gui_app.OCRApp(
+            tk_root, FakeEngine([]), camera_index=0, enhance=True, max_width=640, display_width=960
+        )
+        try:
+            assert (app.display_width, app.display_height) == (960, 540)
         finally:
             app.on_close()

@@ -81,7 +81,7 @@ python gui_app.py --camera 1 --gpu
 
 A styled, resizable desktop window ([ttkbootstrap](https://ttkbootstrap.readthedocs.io/), Tokyo Night dark theme) with:
 
-- **Center**: the live annotated feed, same detection loop as the CLI. Scales to fill the window on resize/maximize (preserving aspect ratio) — this is purely cosmetic and independent of the resolution OCR actually processes at, so resizing the window doesn't change detection speed or accuracy.
+- **Center**: the live annotated feed, same detection loop as the CLI. Rendered at a fixed size (`--display-width`, default 960px wide, height following the camera's aspect ratio) with the panel sized to match it exactly, so there are no letterbox bars around the video. Display only — independent of the resolution OCR actually processes at, so it doesn't affect detection speed or accuracy.
 - **Sidebar**: current FPS with a status indicator, and a timestamped, color-coded log of everything detected (green for captures, blue for loaded images, default for live).
 - **Get OCR (capture frame)**: freezes the current frame and re-runs OCR on it at full resolution — no downscaling — trading the live loop's speed for the best accuracy that single frame can get. Result opens in a popup and is logged as `(capture)`.
 - **Load Image...**: pick any file from disk and run the same full-accuracy OCR on it, independent of the camera. Result opens in a popup and is logged as `(image)`.

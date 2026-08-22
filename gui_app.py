@@ -39,6 +39,8 @@ from realtime_ocr import downscale_for_detection, draw_results
 FRAME_POLL_MS = 10
 THEME = "tokyo-night-dark"
 SIDEBAR_WIDTH_PX = 360
+DISPLAY_WIDTH_PX = 960  # fixed feed width; height follows the camera's aspect ratio
+VIDEO_PADDING_PX = 4
 
 LOG_TAG_COLORS = {
     "live": None,  # falls back to the theme's default foreground
@@ -65,7 +67,8 @@ def maximize_window(root: tk.Misc) -> None:
 
 
 class OCRApp:
-    def __init__(self, root: ttkb.Window, engine: OCREngine, camera_index: int, enhance: bool, max_width: int):
+    def __init__(self, root: ttkb.Window, engine: OCREngine, camera_index: int, enhance: bool,
+                 max_width: int, display_width: int = DISPLAY_WIDTH_PX):
         self.root = root
         self.engine = engine
         self.enhance = enhance
@@ -75,6 +78,16 @@ class OCRApp:
         self.cap = cv2.VideoCapture(camera_index)
         if not self.cap.isOpened():
             raise RuntimeError(f"Could not open camera index {camera_index}")
+
+        # Fix the display size up front, from the camera's aspect ratio. The
+        # panel is then sized to exactly this, so the feed fills it edge to
+        # edge with no letterbox/pillarbox bars. Computing it once (rather
+        # than per frame from the panel's current size) also keeps the
+        # render path independent of widget geometry entirely.
+        cam_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+        cam_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+        self.display_width = display_width
+        self.display_height = max(round(display_width * cam_h / cam_w), 1)
 
         self.latest_frame: np.ndarray = None
         self.prev_time = time.time()
@@ -107,6 +120,7 @@ class OCRApp:
 
     def _build_ui(self) -> None:
         self.root.title("Real-Time OCR (EasyOCR)")
+        self.root.resizable(True, True)  # the splash screen locks this off
         self.root.minsize(900, 600)
         maximize_window(self.root)
 
@@ -132,8 +146,15 @@ class OCRApp:
         # way: window -> panels -> image.
         main.grid_propagate(False)
 
-        self.video_frame = ttkb.Frame(main, bootstyle="dark", padding=4)
-        self.video_frame.grid(row=0, column=0, padx=(0, 12), sticky="nsew")
+        # Sized to exactly fit the feed (plus its padding), and centered in
+        # the cell -- so the bordered panel hugs the video instead of
+        # stretching wide and leaving dark bars either side of it.
+        self.video_frame = ttkb.Frame(
+            main, bootstyle="dark", padding=VIDEO_PADDING_PX,
+            width=self.display_width + 2 * VIDEO_PADDING_PX,
+            height=self.display_height + 2 * VIDEO_PADDING_PX,
+        )
+        self.video_frame.grid(row=0, column=0, padx=(0, 12))
         self.video_frame.pack_propagate(False)
         self.video_label = ttkb.Label(self.video_frame, anchor="center")
         self.video_label.pack(fill=tk.BOTH, expand=True)
@@ -215,16 +236,11 @@ class OCRApp:
             handler(*args)
 
     def _render(self, frame: np.ndarray) -> None:
-        # Scale into whatever size the video panel currently has, so the
-        # feed grows to fill the window on maximize/resize instead of
-        # staying pinned at its original capture resolution. Before the
-        # panel has ever been mapped, winfo_width/height() report 1 (a
-        # Tk placeholder, not real geometry); fall back to a sane default
-        # for that first frame or two.
-        box_w, box_h = self.video_frame.winfo_width(), self.video_frame.winfo_height()
-        if box_w <= 1 or box_h <= 1:
-            box_w, box_h = 800, 600
-        display_frame = fit_frame_to_box(frame, box_w - 8, box_h - 8)  # minus the frame's own padding
+        # Scales to the fixed display size chosen at startup, which the panel
+        # is sized to match exactly. Deliberately does not consult the
+        # panel's current geometry: doing so is what previously let the
+        # rendered size feed back into the layout and grow the window.
+        display_frame = fit_frame_to_box(frame, self.display_width, self.display_height)
         rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
         imgtk = ImageTk.PhotoImage(image=Image.fromarray(rgb))
         self.video_label.imgtk = imgtk  # keep a reference so it isn't garbage collected
@@ -312,6 +328,11 @@ def parse_args() -> argparse.Namespace:
         "--max-width", type=int, default=640,
         help="Downscale live frames to this width before OCR (0 disables). Captures/images always run full-res.",
     )
+    parser.add_argument(
+        "--display-width", type=int, default=DISPLAY_WIDTH_PX,
+        help=f"On-screen width of the feed in pixels (default: {DISPLAY_WIDTH_PX}). "
+             "Height follows the camera's aspect ratio. Display only -- does not affect OCR.",
+    )
     parser.set_defaults(enhance=True)
     return parser.parse_args()
 
@@ -347,7 +368,7 @@ def main() -> None:
 
     def launch_app():
         splash.destroy()
-        OCRApp(root, state["engine"], args.camera, args.enhance, args.max_width)
+        OCRApp(root, state["engine"], args.camera, args.enhance, args.max_width, args.display_width)
 
     threading.Thread(target=load_engine, daemon=True).start()
     root.mainloop()
