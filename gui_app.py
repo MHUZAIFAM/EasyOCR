@@ -22,6 +22,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+from collections import deque
 from datetime import datetime
 from tkinter import filedialog, scrolledtext
 
@@ -33,14 +34,18 @@ from PIL import Image, ImageTk
 from gui_helpers import fit_frame_to_box, resize_for_display, select_new_detections
 from ocr_engine import Detections, OCREngine
 from ocr_worker import OCRWorker
-from preprocessing import enhance_for_ocr
-from realtime_ocr import downscale_for_detection, draw_results
+from preprocessing import enhance_for_ocr, pick_sharpest, upscale_for_ocr
+from realtime_ocr import downscale_for_detection, draw_results, open_camera
 
 FRAME_POLL_MS = 10
 THEME = "tokyo-night-dark"
 SIDEBAR_WIDTH_PX = 360
 DISPLAY_WIDTH_PX = 960  # fixed feed width; height follows the camera's aspect ratio
 VIDEO_PADDING_PX = 4
+# "Get OCR" picks the sharpest of the last few frames rather than whatever
+# frame happened to be on screen, so a moment of hand movement doesn't ruin
+# the capture. Kept short so it stays "the last instant", not stale footage.
+CAPTURE_BUFFER_FRAMES = 8
 
 LOG_TAG_COLORS = {
     "live": None,  # falls back to the theme's default foreground
@@ -68,16 +73,15 @@ def maximize_window(root: tk.Misc) -> None:
 
 class OCRApp:
     def __init__(self, root: ttkb.Window, engine: OCREngine, camera_index: int, enhance: bool,
-                 max_width: int, display_width: int = DISPLAY_WIDTH_PX):
+                 max_width: int, display_width: int = DISPLAY_WIDTH_PX, upscale: bool = False):
         self.root = root
         self.engine = engine
         self.enhance = enhance
         self.max_width = max_width
+        self.upscale = upscale
         self.colors = ttkb.Style().colors
 
-        self.cap = cv2.VideoCapture(camera_index)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"Could not open camera index {camera_index}")
+        self.cap = open_camera(camera_index)
 
         # Fix the display size up front, from the camera's aspect ratio. The
         # panel is then sized to exactly this, so the feed fills it edge to
@@ -90,6 +94,11 @@ class OCRApp:
         self.display_height = max(round(display_width * cam_h / cam_w), 1)
 
         self.latest_frame: np.ndarray = None
+        # A short rolling window of recent frames, so "Get OCR" can pick the
+        # sharpest one instead of whatever frame was on screen at click time.
+        # Reuses frames the live loop already grabbed -- no extra camera
+        # reads, no blocking the UI to collect a burst on demand.
+        self.recent_frames: deque = deque(maxlen=CAPTURE_BUFFER_FRAMES)
         self.prev_time = time.time()
         self.logged_texts: set = set()
         # One-off capture/image results cross from a worker thread to the
@@ -209,6 +218,7 @@ class OCRApp:
         ok, frame = self.cap.read()
         if ok:
             self.latest_frame = frame
+            self.recent_frames.append(frame)
             self.worker.submit(frame)
             results = self.worker.latest_results()
 
@@ -249,17 +259,32 @@ class OCRApp:
     # -- one-off high-accuracy actions -------------------------------------------
 
     def capture_and_run_ocr(self) -> None:
-        if self.latest_frame is None:
+        if not self.recent_frames:
             return
-        frame = self.latest_frame.copy()
+        # Pick the sharpest of the last few frames rather than the current
+        # one -- motion blur is the single worst thing for accuracy, and a
+        # click often lands while the subject is still moving.
+        frame = pick_sharpest(list(self.recent_frames)).copy()
         self._append_log("Capturing frame for high-accuracy OCR...", tag="system")
 
         def work():
-            processed = enhance_for_ocr(frame) if self.enhance else frame
-            results = self.engine.read(processed)  # full resolution, no downscale
+            results = self._read_at_full_accuracy(frame)
             self.pending_results.put((self._show_capture_results, (frame, results)))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _read_at_full_accuracy(self, frame: np.ndarray) -> Detections:
+        """OCR a single frame with no downscaling -- used by the capture and
+        load-image buttons, which are one-offs and can take the time the live
+        loop can't. Boxes come back in the original frame's coordinates."""
+        processed = upscale_for_ocr(frame) if self.upscale else frame
+        processed = enhance_for_ocr(processed) if self.enhance else processed
+        results = self.engine.read(processed)
+
+        scale = processed.shape[1] / frame.shape[1]
+        if scale != 1.0:
+            results = [(np.round(box / scale).astype(int), text, conf) for box, text, conf in results]
+        return results
 
     def _show_capture_results(self, frame: np.ndarray, results: Detections) -> None:
         if not results:
@@ -285,8 +310,7 @@ class OCRApp:
         self._append_log(f"Running OCR on {path}...", tag="system")
 
         def work():
-            processed = enhance_for_ocr(frame) if self.enhance else frame
-            results = self.engine.read(processed)
+            results = self._read_at_full_accuracy(frame)
             self.pending_results.put((self._show_image_results, (frame, results, path)))
 
         threading.Thread(target=work, daemon=True).start()
@@ -333,6 +357,12 @@ def parse_args() -> argparse.Namespace:
         help=f"On-screen width of the feed in pixels (default: {DISPLAY_WIDTH_PX}). "
              "Height follows the camera's aspect ratio. Display only -- does not affect OCR.",
     )
+    parser.add_argument(
+        "--upscale", action="store_true",
+        help="Upscale captures/images before OCR. Helps genuinely small text "
+             "(distant signs, seven-segment displays) but measurably hurts "
+             "text that is already a reasonable size, so it is off by default.",
+    )
     parser.set_defaults(enhance=True)
     return parser.parse_args()
 
@@ -368,7 +398,8 @@ def main() -> None:
 
     def launch_app():
         splash.destroy()
-        OCRApp(root, state["engine"], args.camera, args.enhance, args.max_width, args.display_width)
+        OCRApp(root, state["engine"], args.camera, args.enhance, args.max_width,
+               args.display_width, args.upscale)
 
     threading.Thread(target=load_engine, daemon=True).start()
     root.mainloop()

@@ -22,6 +22,21 @@ from ocr_engine import Detections, OCREngine
 from ocr_worker import OCRWorker
 from preprocessing import enhance_for_ocr
 
+# OpenCV opens most webcams at 640x480 even when the hardware supports far
+# more, and that low resolution is a real accuracy ceiling for recognition.
+# Ask for 720p; the driver silently keeps its own default if it can't.
+CAMERA_WIDTH = 1280
+CAMERA_HEIGHT = 720
+
+
+def open_camera(camera_index: int, width: int = CAMERA_WIDTH, height: int = CAMERA_HEIGHT) -> cv2.VideoCapture:
+    cap = cv2.VideoCapture(camera_index)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open camera index {camera_index}")
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    return cap
+
 
 def downscale_for_detection(frame: np.ndarray, max_width: int) -> Tuple[np.ndarray, float]:
     """Shrink the frame before OCR to cut inference time; EasyOCR's cost
@@ -90,9 +105,7 @@ def check_gui_support() -> None:
 def run_on_webcam(engine: OCREngine, camera_index: int, enhance: bool, max_width: int) -> None:
     check_gui_support()
 
-    cap = cv2.VideoCapture(camera_index)
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open camera index {camera_index}")
+    cap = open_camera(camera_index)
 
     def process_frame(frame):
         small, scale = downscale_for_detection(frame, max_width)

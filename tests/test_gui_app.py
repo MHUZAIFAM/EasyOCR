@@ -34,6 +34,9 @@ class FakeCapture:
             return self._frame.shape[0]
         return 0
 
+    def set(self, prop, value):
+        return True  # a real driver may ignore the request too
+
     def release(self):
         pass
 
@@ -73,7 +76,7 @@ def test_live_detection_appears_in_log(tk_root):
     frame = np.full((480, 640, 3), 100, dtype=np.uint8)
     detection = (np.array([[10, 10], [50, 10], [50, 30], [10, 30]]), "LIVE TEXT", 0.9)
 
-    with patch("gui_app.cv2.VideoCapture", return_value=FakeCapture(frame)):
+    with patch("realtime_ocr.cv2.VideoCapture", return_value=FakeCapture(frame)):
         app = gui_app.OCRApp(tk_root, FakeEngine([detection]), camera_index=0, enhance=True, max_width=640)
         try:
             pump(tk_root, seconds=0.4)
@@ -88,7 +91,7 @@ def test_capture_button_uses_full_resolution_and_logs_via_queue(tk_root):
     frame = np.full((480, 640, 3), 100, dtype=np.uint8)
     detection = (np.array([[10, 10], [50, 10], [50, 30], [10, 30]]), "CAPTURED TEXT", 0.95)
 
-    with patch("gui_app.cv2.VideoCapture", return_value=FakeCapture(frame)):
+    with patch("realtime_ocr.cv2.VideoCapture", return_value=FakeCapture(frame)):
         app = gui_app.OCRApp(tk_root, FakeEngine([detection]), camera_index=0, enhance=True, max_width=640)
         try:
             pump(tk_root, seconds=0.2)  # let latest_frame populate
@@ -119,7 +122,7 @@ def test_feed_renders_at_a_fixed_size_regardless_of_window_size(tk_root):
     """
     frame = np.full((480, 640, 3), 100, dtype=np.uint8)
 
-    with patch("gui_app.cv2.VideoCapture", return_value=FakeCapture(frame)):
+    with patch("realtime_ocr.cv2.VideoCapture", return_value=FakeCapture(frame)):
         app = gui_app.OCRApp(tk_root, FakeEngine([]), camera_index=0, enhance=True, max_width=640)
         try:
             tk_root.state("normal")
@@ -145,7 +148,7 @@ def test_video_panel_hugs_the_feed_without_letterbox_bars(tk_root):
     only the intended few pixels of border padding."""
     frame = np.full((480, 640, 3), 100, dtype=np.uint8)
 
-    with patch("gui_app.cv2.VideoCapture", return_value=FakeCapture(frame)):
+    with patch("realtime_ocr.cv2.VideoCapture", return_value=FakeCapture(frame)):
         app = gui_app.OCRApp(tk_root, FakeEngine([]), camera_index=0, enhance=True, max_width=640)
         try:
             pump(tk_root, seconds=0.3, step=0.01)
@@ -161,11 +164,103 @@ def test_video_panel_hugs_the_feed_without_letterbox_bars(tk_root):
             app.on_close()
 
 
+class CyclingCapture:
+    """Yields frames from a list in turn, imitating a camera whose subject is
+    moving (blurred) most of the time and briefly still (sharp)."""
+
+    def __init__(self, frames):
+        self._frames = frames
+        self._i = 0
+
+    def isOpened(self):
+        return True
+
+    def read(self):
+        frame = self._frames[self._i % len(self._frames)]
+        self._i += 1
+        return True, frame.copy()
+
+    def get(self, prop):
+        import cv2
+
+        if prop == cv2.CAP_PROP_FRAME_WIDTH:
+            return self._frames[0].shape[1]
+        if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+            return self._frames[0].shape[0]
+        return 0
+
+    def set(self, prop, value):
+        return True
+
+    def release(self):
+        pass
+
+
+class RecordingEngine:
+    """Records every frame it is asked to read.
+
+    Both the live loop and the capture button call read(), so tests have to
+    keep all of them and pick out the one they mean -- the capture path is
+    identifiable by its upscaled width.
+    """
+
+    def __init__(self):
+        self.frames = []
+
+    def read(self, frame):
+        self.frames.append(frame)
+        return []
+
+
+def test_capture_picks_the_sharpest_recent_frame_not_the_current_one(tk_root):
+    """Motion blur wrecks recognition, so 'Get OCR' should reach back for the
+    sharpest of the last few frames rather than whatever was on screen when
+    the button happened to be clicked."""
+    import cv2
+
+    from preprocessing import sharpness
+
+    def make(blur_len):
+        img = np.full((480, 640, 3), 240, dtype=np.uint8)
+        cv2.putText(img, "CAPTURE ME 123", (30, 260), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (20, 20, 20), 3)
+        if blur_len > 1:
+            kernel = np.zeros((blur_len, blur_len))
+            kernel[blur_len // 2, :] = 1 / blur_len
+            img = cv2.filter2D(img, -1, kernel)
+        return img
+
+    sharp, blurry = make(0), make(13)
+    # Mostly blurred frames with a single sharp one in the middle.
+    frames = [blurry, blurry, sharp, blurry, blurry]
+    engine = RecordingEngine()
+
+    # max_width=320 makes the live loop downscale, so its reads are 320px
+    # wide while the capture path's full-resolution read is 640px -- that's
+    # how we pick the capture's frame out of the recorded reads.
+    with patch("realtime_ocr.cv2.VideoCapture", return_value=CyclingCapture(frames)):
+        app = gui_app.OCRApp(tk_root, engine, camera_index=0, enhance=False, max_width=320)
+        try:
+            pump(tk_root, seconds=0.4, step=0.01)  # fill the rolling buffer
+            assert len(app.recent_frames) > 1, "rolling frame buffer never filled"
+
+            app.capture_and_run_ocr()
+            pump(tk_root, seconds=0.5, step=0.01)
+
+            captured = [f for f in engine.frames if f.shape[1] == 640]
+            assert captured, "capture never reached the engine at full resolution"
+
+            assert sharpness(captured[-1]) > sharpness(blurry), (
+                "capture used a motion-blurred frame instead of the sharp one"
+            )
+        finally:
+            app.on_close()
+
+
 def test_display_size_follows_the_camera_aspect_ratio(tk_root):
     """A 16:9 camera must not be squashed into a 4:3 panel (or vice versa)."""
     widescreen = np.full((720, 1280, 3), 100, dtype=np.uint8)
 
-    with patch("gui_app.cv2.VideoCapture", return_value=FakeCapture(widescreen)):
+    with patch("realtime_ocr.cv2.VideoCapture", return_value=FakeCapture(widescreen)):
         app = gui_app.OCRApp(
             tk_root, FakeEngine([]), camera_index=0, enhance=True, max_width=640, display_width=960
         )

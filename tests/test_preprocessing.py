@@ -1,6 +1,16 @@
+import cv2
 import numpy as np
+import pytest
 
-from preprocessing import apply_clahe, enhance_for_ocr, estimate_brightness, gamma_correct
+from preprocessing import (
+    apply_clahe,
+    enhance_for_ocr,
+    estimate_brightness,
+    gamma_correct,
+    pick_sharpest,
+    sharpness,
+    upscale_for_ocr,
+)
 
 
 def solid_frame(value: int, shape=(100, 100, 3)) -> np.ndarray:
@@ -54,3 +64,60 @@ def test_enhance_for_ocr_keeps_frame_shape_and_dtype():
     enhanced = enhance_for_ocr(frame)
     assert enhanced.shape == frame.shape
     assert enhanced.dtype == frame.dtype
+
+
+def textured_frame(blur_len: int = 0) -> np.ndarray:
+    """A frame with real edges, optionally motion-blurred."""
+    img = np.full((160, 640, 3), 240, dtype=np.uint8)
+    cv2.putText(img, "SHARPNESS TEST 123", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (20, 20, 20), 2)
+    if blur_len > 1:
+        kernel = np.zeros((blur_len, blur_len))
+        kernel[blur_len // 2, :] = 1 / blur_len
+        img = cv2.filter2D(img, -1, kernel)
+    return img
+
+
+def test_sharpness_scores_a_blurred_frame_lower_than_a_sharp_one():
+    assert sharpness(textured_frame(blur_len=0)) > sharpness(textured_frame(blur_len=11))
+
+
+def test_sharpness_of_a_flat_frame_is_near_zero():
+    assert sharpness(solid_frame(128)) < 1.0
+
+
+def test_pick_sharpest_finds_the_unblurred_frame_in_a_burst():
+    burst = [textured_frame(11), textured_frame(9), textured_frame(0), textured_frame(7)]
+    chosen = pick_sharpest(burst)
+    assert chosen is burst[2]
+
+
+def test_pick_sharpest_rejects_an_empty_burst():
+    with pytest.raises(ValueError):
+        pick_sharpest([])
+
+
+def test_upscale_for_ocr_enlarges_small_frames_preserving_aspect():
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    out = upscale_for_ocr(frame, min_width=1280)
+    assert out.shape[1] == 1280
+    assert out.shape[0] == 960  # 480 * (1280/640)
+
+
+def test_upscale_for_ocr_leaves_already_large_frames_alone():
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    out = upscale_for_ocr(frame, min_width=1280)
+    assert out.shape == frame.shape
+
+
+def test_upscaled_detection_boxes_map_back_to_original_coordinates():
+    """The capture path runs OCR on an upscaled frame but draws boxes on the
+    original, so the inverse scaling has to line up."""
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    upscaled = upscale_for_ocr(frame, min_width=1280)
+
+    scale = upscaled.shape[1] / frame.shape[1]
+    assert scale == 2.0
+
+    box_on_upscaled = np.array([[200, 200], [400, 200], [400, 300], [200, 300]])
+    mapped_back = np.round(box_on_upscaled / scale).astype(int)
+    assert mapped_back.tolist() == [[100, 100], [200, 100], [200, 150], [100, 150]]

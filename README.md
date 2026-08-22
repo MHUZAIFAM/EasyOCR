@@ -83,12 +83,24 @@ A styled, resizable desktop window ([ttkbootstrap](https://ttkbootstrap.readthed
 
 - **Center**: the live annotated feed, same detection loop as the CLI. Rendered at a fixed size (`--display-width`, default 960px wide, height following the camera's aspect ratio) with the panel sized to match it exactly, so there are no letterbox bars around the video. Display only — independent of the resolution OCR actually processes at, so it doesn't affect detection speed or accuracy.
 - **Sidebar**: current FPS with a status indicator, and a timestamped, color-coded log of everything detected (green for captures, blue for loaded images, default for live).
-- **Get OCR (capture frame)**: freezes the current frame and re-runs OCR on it at full resolution — no downscaling — trading the live loop's speed for the best accuracy that single frame can get. Result opens in a popup and is logged as `(capture)`.
+- **Get OCR (capture frame)**: picks the **sharpest of the last few frames** and re-runs OCR on it at full resolution — no downscaling — trading the live loop's speed for the best accuracy that moment can give. Result opens in a popup and is logged as `(capture)`.
 - **Load Image...**: pick any file from disk and run the same full-accuracy OCR on it, independent of the camera. Result opens in a popup and is logged as `(image)`.
 
 The EasyOCR model (and the PyTorch it pulls in) can take several seconds to load. Rather than leave the window looking frozen during that, a loading screen appears immediately while the model loads on a background thread, then swaps in the real UI once it's ready.
 
 The GUI reuses the same `OCREngine`/`OCRWorker`/`preprocessing` modules as the CLI — it's a different front-end on the same pipeline, not a separate implementation. It also sidesteps the `opencv-python-headless` GUI conflict entirely, since Tkinter never touches OpenCV's own window backend.
+
+## Accuracy notes
+
+Some measured findings, since a few of them are counterintuitive:
+
+**Motion blur is the single biggest accuracy killer.** On the same text, a motion-blurred frame scored 0.03 confidence and returned `'Po1*8i9? (30r0i@)'`, while a sharp frame scored 0.71 and returned `"POND'S: $5.99 (50% offl)"`. This is why a webcam capture often reads far worse than a saved photo — the photo was taken while holding still. "Get OCR" therefore picks the sharpest of the last several frames (by variance of the Laplacian) instead of whatever frame was on screen when you clicked.
+
+**Camera resolution matters and OpenCV under-requests it.** OpenCV opens most webcams at 640×480 even when the hardware supports more, which is a hard ceiling on recognition. Both entry points now ask for 720p and fall back silently if the driver refuses.
+
+**Upscaling before OCR is not a reliable win**, which is why `--upscale` is opt-in rather than default. Measured on the same string: at ~12px character height it helped (0.51 → 0.75), but at ~22px it *hurt* (0.85 → 0.68). EasyOCR already rescales internally, and interpolating on top of that can work against it. Worth trying for genuinely small text — distant signs, seven-segment displays — and not otherwise.
+
+**Punctuation is supported.** The English model's character set includes ``!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~`` and it does read them (`POND'S: $5.99 (50% off!)` comes back essentially intact on a clean frame). If punctuation seems to go missing, the likely causes are the confidence threshold (punctuated strings tend to score lower overall — try `--min-confidence 0.25`) or the detector not boxing a small mark like an apostrophe on a stylised logo. For other scripts, pass the language: `--lang en ur`, `--lang ch_sim`, etc.
 
 ## Testing
 
