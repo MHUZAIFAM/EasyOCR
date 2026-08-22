@@ -18,6 +18,20 @@ from ocr_engine import OCREngine
 from preprocessing import enhance_for_ocr
 
 
+def downscale_for_detection(frame: np.ndarray, max_width: int):
+    """Shrink the frame before OCR to cut inference time; EasyOCR's cost
+    scales with pixel count, so this matters far more than skipping frames.
+    Returns the (possibly) resized frame and the scale factor to map
+    detected boxes back onto the original frame.
+    """
+    h, w = frame.shape[:2]
+    if max_width <= 0 or w <= max_width:
+        return frame, 1.0
+    scale = max_width / w
+    resized = cv2.resize(frame, (max_width, int(h * scale)), interpolation=cv2.INTER_AREA)
+    return resized, scale
+
+
 def draw_results(frame: np.ndarray, results) -> np.ndarray:
     for box, text, conf in results:
         cv2.polylines(frame, [box], isClosed=True, color=(0, 255, 0), thickness=2)
@@ -47,7 +61,7 @@ def run_on_image(engine: OCREngine, path: str, enhance: bool, output: str = None
     print(f"Saved annotated result to {out_path}")
 
 
-def run_on_webcam(engine: OCREngine, camera_index: int, enhance: bool, detect_every: int) -> None:
+def run_on_webcam(engine: OCREngine, camera_index: int, enhance: bool, detect_every: int, max_width: int) -> None:
     cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
         raise RuntimeError(f"Could not open camera index {camera_index}")
@@ -65,8 +79,12 @@ def run_on_webcam(engine: OCREngine, camera_index: int, enhance: bool, detect_ev
                 break
 
             if frame_count % detect_every == 0:
-                processed = enhance_for_ocr(frame) if enhance else frame
+                small, scale = downscale_for_detection(frame, max_width)
+                processed = enhance_for_ocr(small) if enhance else small
                 results = engine.read(processed)
+                if scale != 1.0:
+                    inv = 1.0 / scale
+                    results = [(np.round(box * inv).astype(int), text, conf) for box, text, conf in results]
 
             annotated = draw_results(frame.copy(), results)
 
@@ -98,6 +116,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-confidence", type=float, default=0.4, help="Drop detections below this confidence")
     parser.add_argument("--no-enhance", dest="enhance", action="store_false", help="Disable lighting preprocessing")
     parser.add_argument("--detect-every", type=int, default=1, help="Run OCR every N frames (webcam mode, for speed)")
+    parser.add_argument(
+        "--max-width", type=int, default=640,
+        help="Downscale frames to this width before OCR to speed up CPU inference (0 disables)",
+    )
     parser.set_defaults(enhance=True)
     return parser.parse_args()
 
@@ -109,7 +131,7 @@ def main() -> None:
     if args.image:
         run_on_image(engine, args.image, args.enhance, args.output)
     else:
-        run_on_webcam(engine, args.camera, args.enhance, max(args.detect_every, 1))
+        run_on_webcam(engine, args.camera, args.enhance, max(args.detect_every, 1), args.max_width)
 
 
 if __name__ == "__main__":
