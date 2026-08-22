@@ -34,8 +34,9 @@ from PIL import Image, ImageTk
 from gui_helpers import fit_frame_to_box, resize_for_display, select_new_detections
 from ocr_engine import Detections, OCREngine
 from ocr_worker import OCRWorker
-from preprocessing import enhance_for_ocr, pick_sharpest, upscale_for_ocr
+from preprocessing import enhance_for_ocr, pick_sharpest
 from realtime_ocr import downscale_for_detection, draw_results, open_camera
+from stabilizer import DetectionStabilizer
 
 FRAME_POLL_MS = 10
 THEME = "tokyo-night-dark"
@@ -46,6 +47,9 @@ VIDEO_PADDING_PX = 4
 # frame happened to be on screen, so a moment of hand movement doesn't ruin
 # the capture. Kept short so it stays "the last instant", not stale footage.
 CAPTURE_BUFFER_FRAMES = 8
+# The capture button can afford EasyOCR's slower, more thorough detection
+# pass; the live loop cannot (it roughly triples inference time).
+CAPTURE_MAG_RATIO = 2.0
 
 LOG_TAG_COLORS = {
     "live": None,  # falls back to the theme's default foreground
@@ -73,12 +77,14 @@ def maximize_window(root: tk.Misc) -> None:
 
 class OCRApp:
     def __init__(self, root: ttkb.Window, engine: OCREngine, camera_index: int, enhance: bool,
-                 max_width: int, display_width: int = DISPLAY_WIDTH_PX, upscale: bool = False):
+                 max_width: int, display_width: int = DISPLAY_WIDTH_PX, stabilize: bool = True):
         self.root = root
         self.engine = engine
         self.enhance = enhance
         self.max_width = max_width
-        self.upscale = upscale
+        # Live results are averaged over a short window so a stationary sign
+        # reads steadily instead of flickering between per-frame guesses.
+        self.stabilizer = DetectionStabilizer() if stabilize else None
         self.colors = ttkb.Style().colors
 
         self.cap = open_camera(camera_index)
@@ -101,6 +107,8 @@ class OCRApp:
         self.recent_frames: deque = deque(maxlen=CAPTURE_BUFFER_FRAMES)
         self.prev_time = time.time()
         self.logged_texts: set = set()
+        self._last_results_version = -1
+        self._stable_results: Detections = []
         # One-off capture/image results cross from a worker thread to the
         # main thread here. Tkinter itself isn't thread-safe, so results are
         # only ever consumed from _update_loop, which already runs on the
@@ -220,7 +228,18 @@ class OCRApp:
             self.latest_frame = frame
             self.recent_frames.append(frame)
             self.worker.submit(frame)
-            results = self.worker.latest_results()
+
+            # Only feed the stabilizer when OCR has actually finished a new
+            # pass. This loop polls ~100x/sec while OCR completes ~1x/sec, so
+            # voting on every poll would just count one result many times.
+            version, raw_results = self.worker.latest_versioned_results()
+            if self.stabilizer is None:
+                results = raw_results
+            else:
+                if version != self._last_results_version:
+                    self._last_results_version = version
+                    self._stable_results = self.stabilizer.update(raw_results)
+                results = self._stable_results
 
             now = time.time()
             fps = 1.0 / max(now - self.prev_time, 1e-6)
@@ -274,17 +293,12 @@ class OCRApp:
         threading.Thread(target=work, daemon=True).start()
 
     def _read_at_full_accuracy(self, frame: np.ndarray) -> Detections:
-        """OCR a single frame with no downscaling -- used by the capture and
-        load-image buttons, which are one-offs and can take the time the live
-        loop can't. Boxes come back in the original frame's coordinates."""
-        processed = upscale_for_ocr(frame) if self.upscale else frame
-        processed = enhance_for_ocr(processed) if self.enhance else processed
-        results = self.engine.read(processed)
-
-        scale = processed.shape[1] / frame.shape[1]
-        if scale != 1.0:
-            results = [(np.round(box / scale).astype(int), text, conf) for box, text, conf in results]
-        return results
+        """OCR a single frame with no downscaling and EasyOCR's slower,
+        higher-magnification detection pass -- used by the capture and
+        load-image buttons, which are one-offs and can spend the time the
+        live loop can't."""
+        processed = enhance_for_ocr(frame) if self.enhance else frame
+        return self.engine.read(processed, mag_ratio=CAPTURE_MAG_RATIO)
 
     def _show_capture_results(self, frame: np.ndarray, results: Detections) -> None:
         if not results:
@@ -358,12 +372,18 @@ def parse_args() -> argparse.Namespace:
              "Height follows the camera's aspect ratio. Display only -- does not affect OCR.",
     )
     parser.add_argument(
-        "--upscale", action="store_true",
-        help="Upscale captures/images before OCR. Helps genuinely small text "
-             "(distant signs, seven-segment displays) but measurably hurts "
-             "text that is already a reasonable size, so it is off by default.",
+        "--allowlist", type=str, default=None,
+        help="Restrict recognition to these characters. A large accuracy win "
+             "when the text has a known format -- e.g. --allowlist '0123456789:/' "
+             "for a clock read '3:32' at 1.00 confidence where the unrestricted "
+             "model returned '3.32'.",
     )
-    parser.set_defaults(enhance=True)
+    parser.add_argument(
+        "--no-stabilize", dest="stabilize", action="store_false",
+        help="Show each frame's raw OCR result instead of a consensus over the "
+             "last couple of seconds. Noisier, but responds instantly.",
+    )
+    parser.set_defaults(enhance=True, stabilize=True)
     return parser.parse_args()
 
 
@@ -393,13 +413,16 @@ def main() -> None:
     state = {}
 
     def load_engine():
-        state["engine"] = OCREngine(languages=args.lang, use_gpu=args.gpu, min_confidence=args.min_confidence)
+        state["engine"] = OCREngine(
+            languages=args.lang, use_gpu=args.gpu,
+            min_confidence=args.min_confidence, allowlist=args.allowlist,
+        )
         root.after(0, launch_app)
 
     def launch_app():
         splash.destroy()
         OCRApp(root, state["engine"], args.camera, args.enhance, args.max_width,
-               args.display_width, args.upscale)
+               args.display_width, args.stabilize)
 
     threading.Thread(target=load_engine, daemon=True).start()
     root.mainloop()

@@ -45,22 +45,19 @@ class FakeEngine:
     def __init__(self, detections):
         self._detections = detections
 
-    def read(self, frame):
+    def read(self, frame, mag_ratio=1.0):
         return self._detections
 
 
-@pytest.fixture
-def tk_root():
-    try:
-        root = ttkb.Window(themename="tokyo-night-dark")
-        root.withdraw()
-    except tk.TclError:
-        pytest.skip("no display available for Tk")
-    yield root
-    try:
-        root.destroy()
-    except tk.TclError:
-        pass
+def stop_app(app):
+    """Shut an app down without destroying the root.
+
+    app.on_close() destroys the root, but the root is shared across the whole
+    session (see conftest), so tests release the app's own resources instead.
+    on_close itself is covered by its own test below.
+    """
+    app.worker.stop()
+    app.cap.release()
 
 
 def pump(root, seconds=0.3, step=0.05):
@@ -84,7 +81,7 @@ def test_live_detection_appears_in_log(tk_root):
             assert "LIVE TEXT" in log_content
             assert "(live)" in log_content
         finally:
-            app.on_close()
+            stop_app(app)
 
 
 def test_capture_button_uses_full_resolution_and_logs_via_queue(tk_root):
@@ -102,7 +99,7 @@ def test_capture_button_uses_full_resolution_and_logs_via_queue(tk_root):
             assert "(capture)" in log_content
             assert "CAPTURED TEXT" in log_content
         finally:
-            app.on_close()
+            stop_app(app)
 
 
 def test_feed_renders_at_a_fixed_size_regardless_of_window_size(tk_root):
@@ -140,7 +137,7 @@ def test_feed_renders_at_a_fixed_size_regardless_of_window_size(tk_root):
                 f"{app.display_width}px or the growth feedback loop is back"
             )
         finally:
-            app.on_close()
+            stop_app(app)
 
 
 def test_video_panel_hugs_the_feed_without_letterbox_bars(tk_root):
@@ -161,7 +158,7 @@ def test_video_panel_hugs_the_feed_without_letterbox_bars(tk_root):
             assert width_gap <= allowed, f"{width_gap / 2:.0f}px bars either side of the feed"
             assert height_gap <= allowed, f"{height_gap / 2:.0f}px bars above/below the feed"
         finally:
-            app.on_close()
+            stop_app(app)
 
 
 class CyclingCapture:
@@ -206,9 +203,11 @@ class RecordingEngine:
 
     def __init__(self):
         self.frames = []
+        self.mag_ratios = []
 
-    def read(self, frame):
+    def read(self, frame, mag_ratio=1.0):
         self.frames.append(frame)
+        self.mag_ratios.append(mag_ratio)
         return []
 
 
@@ -253,7 +252,90 @@ def test_capture_picks_the_sharpest_recent_frame_not_the_current_one(tk_root):
                 "capture used a motion-blurred frame instead of the sharp one"
             )
         finally:
+            stop_app(app)
+
+
+def test_capture_uses_a_higher_magnification_than_the_live_loop(tk_root):
+    """Raising EasyOCR's mag_ratio recovers small glyphs (a clock's colon)
+    but roughly triples inference time, so only the one-off capture path --
+    which can afford it -- should use it."""
+    frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+    engine = RecordingEngine()
+
+    with patch("realtime_ocr.cv2.VideoCapture", return_value=FakeCapture(frame)):
+        app = gui_app.OCRApp(tk_root, engine, camera_index=0, enhance=False, max_width=640)
+        try:
+            pump(tk_root, seconds=0.3, step=0.01)
+            live_calls = len(engine.mag_ratios)
+            assert live_calls, "live loop never called the engine"
+            assert all(m == 1.0 for m in engine.mag_ratios), (
+                f"live loop used a slow magnification: {set(engine.mag_ratios)}"
+            )
+
+            app.capture_and_run_ocr()
+            pump(tk_root, seconds=0.5, step=0.01)
+
+            capture_mags = engine.mag_ratios[live_calls:]
+            assert gui_app.CAPTURE_MAG_RATIO in capture_mags, (
+                f"capture did not use the higher magnification: {capture_mags}"
+            )
+        finally:
+            stop_app(app)
+
+
+def test_live_view_is_stabilized_across_frames(tk_root):
+    """A stationary sign whose per-frame readings disagree should settle on
+    the consensus rather than flickering between them."""
+    frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+    box = np.array([[100, 50], [300, 50], [300, 120], [100, 120]])
+
+    class FlickeringEngine:
+        """Mostly reads '8/22', occasionally garbles it."""
+
+        def __init__(self):
+            self._readings = ["8/22", "8/22", "822", "8/22", "8122", "8/22"]
+            self._i = 0
+
+        def read(self, frame, mag_ratio=1.0):
+            text = self._readings[self._i % len(self._readings)]
+            self._i += 1
+            return [(box, text, 0.9)]
+
+    with patch("realtime_ocr.cv2.VideoCapture", return_value=FakeCapture(frame)):
+        app = gui_app.OCRApp(tk_root, FlickeringEngine(), camera_index=0, enhance=False, max_width=640)
+        try:
+            pump(tk_root, seconds=1.0, step=0.01)
+            logged = app.log.get("1.0", tk.END)
+
+            # The consensus reading must appear; the one-off garbles must not,
+            # since each is seen far less often than the correct reading.
+            assert "8/22" in logged
+            assert "8122" not in logged, f"transient misread leaked through:\n{logged}"
+        finally:
+            stop_app(app)
+
+
+def test_on_close_stops_the_worker_and_releases_the_camera(tk_root):
+    """Covered separately because the other tests use stop_app() -- on_close
+    destroys the root, which is shared across the session."""
+    frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+
+    class TrackingCapture(FakeCapture):
+        released = False
+
+        def release(self):
+            self.released = True
+
+    cap = TrackingCapture(frame)
+    with patch("realtime_ocr.cv2.VideoCapture", return_value=cap):
+        app = gui_app.OCRApp(tk_root, FakeEngine([]), camera_index=0, enhance=True, max_width=640)
+        pump(tk_root, seconds=0.15, step=0.01)
+
+        with patch.object(app.root, "destroy"):  # keep the shared root alive
             app.on_close()
+
+        assert cap.released, "camera was not released"
+        assert not app.worker._running, "worker thread was not stopped"
 
 
 def test_display_size_follows_the_camera_aspect_ratio(tk_root):
@@ -267,4 +349,4 @@ def test_display_size_follows_the_camera_aspect_ratio(tk_root):
         try:
             assert (app.display_width, app.display_height) == (960, 540)
         finally:
-            app.on_close()
+            stop_app(app)

@@ -64,13 +64,14 @@ def draw_results(frame: np.ndarray, results: Detections) -> np.ndarray:
     return frame
 
 
-def run_on_image(engine: OCREngine, path: str, enhance: bool, output: str = None) -> None:
+def run_on_image(engine: OCREngine, path: str, enhance: bool, output: str = None,
+                 mag_ratio: float = 1.0) -> None:
     frame = cv2.imread(path)
     if frame is None:
         raise FileNotFoundError(f"Could not read image: {path}")
 
     processed = enhance_for_ocr(frame) if enhance else frame
-    results = engine.read(processed)
+    results = engine.read(processed, mag_ratio=mag_ratio)
 
     for box, text, conf in results:
         print(f"[{conf:.2f}] {text}")
@@ -102,7 +103,8 @@ def check_gui_support() -> None:
         raise SystemExit(GUI_FIX_HINT) from e
 
 
-def run_on_webcam(engine: OCREngine, camera_index: int, enhance: bool, max_width: int) -> None:
+def run_on_webcam(engine: OCREngine, camera_index: int, enhance: bool, max_width: int,
+                  mag_ratio: float = 1.0) -> None:
     check_gui_support()
 
     cap = open_camera(camera_index)
@@ -110,7 +112,7 @@ def run_on_webcam(engine: OCREngine, camera_index: int, enhance: bool, max_width
     def process_frame(frame):
         small, scale = downscale_for_detection(frame, max_width)
         processed = enhance_for_ocr(small) if enhance else small
-        results = engine.read(processed)
+        results = engine.read(processed, mag_ratio=mag_ratio)
         if scale != 1.0:
             inv = 1.0 / scale
             results = [(np.round(box * inv).astype(int), text, conf) for box, text, conf in results]
@@ -162,18 +164,32 @@ def parse_args() -> argparse.Namespace:
         "--max-width", type=int, default=640,
         help="Downscale frames to this width before OCR to speed up CPU inference (0 disables)",
     )
+    parser.add_argument(
+        "--allowlist", type=str, default=None,
+        help="Restrict recognition to these characters, e.g. '0123456789:/' for "
+             "a clock. A large accuracy win whenever the text has a known format.",
+    )
+    parser.add_argument(
+        "--mag-ratio", type=float, default=1.0,
+        help="EasyOCR magnification before detection (default: 1.0). Raising it "
+             "recovers small glyphs a clock's colon, for instance but costs "
+             "roughly proportional time, so it suits --image more than the webcam.",
+    )
     parser.set_defaults(enhance=True)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    engine = OCREngine(languages=args.lang, use_gpu=args.gpu, min_confidence=args.min_confidence)
+    engine = OCREngine(
+        languages=args.lang, use_gpu=args.gpu,
+        min_confidence=args.min_confidence, allowlist=args.allowlist,
+    )
 
     if args.image:
-        run_on_image(engine, args.image, args.enhance, args.output)
+        run_on_image(engine, args.image, args.enhance, args.output, args.mag_ratio)
     else:
-        run_on_webcam(engine, args.camera, args.enhance, args.max_width)
+        run_on_webcam(engine, args.camera, args.enhance, args.max_width, args.mag_ratio)
 
 
 if __name__ == "__main__":

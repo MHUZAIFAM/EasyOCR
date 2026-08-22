@@ -9,7 +9,7 @@ publishes results the main loop can read without waiting.
 
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 
@@ -24,6 +24,10 @@ class OCRWorker:
         self._lock = threading.Lock()
         self._pending_frame: Optional[np.ndarray] = None
         self._results: Detections = []
+        # Bumped on each completed pass. The display loop polls far faster
+        # than OCR completes, so callers that must react once per *result*
+        # (rather than once per poll) can watch this instead of the list.
+        self._version = 0
         self._running = False
         self._thread = threading.Thread(target=self._loop, daemon=True)
 
@@ -43,6 +47,11 @@ class OCRWorker:
         with self._lock:
             return self._results
 
+    def latest_versioned_results(self) -> Tuple[int, Detections]:
+        """Results plus the version they came from, read atomically."""
+        with self._lock:
+            return self._version, self._results
+
     def _loop(self) -> None:
         while self._running:
             with self._lock:
@@ -57,3 +66,4 @@ class OCRWorker:
 
             with self._lock:
                 self._results = results
+                self._version += 1
