@@ -1,5 +1,6 @@
 # Real-Time OCR with EasyOCR
 
+
 [![CI](https://github.com/MHUZAIFAM/EasyOCR/actions/workflows/ci.yml/badge.svg)](https://github.com/MHUZAIFAM/EasyOCR/actions/workflows/ci.yml)
 
 A real-time text recognition system that reads text straight from a live camera feed using [EasyOCR](https://github.com/JaidedAI/EasyOCR) and OpenCV, with adaptive preprocessing so it keeps working under extreme lighting and poor visibility (very dark rooms, backlighting, glare/washout).
